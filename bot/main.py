@@ -17,22 +17,26 @@ try:
 except Exception:  # pragma: no cover - very old yt-dlp
     _yt_curl_cffi = None
 
+try:
+    import yt_dlp as _yt_dlp
+    _YTDLP_VERSION = getattr(getattr(_yt_dlp, "version", None), "__version__", "?")
+except Exception:  # pragma: no cover
+    _YTDLP_VERSION = "?"
+
 
 def check_impersonation() -> None:
     """Pornhub blocks non-browser HTTP clients. yt-dlp's extractor needs
     browser impersonation, which requires the optional 'curl_cffi' package.
     Without it every Pornhub request is redirected/blocked and downloads
     fail with 'Redirection detected' or HTTP 403."""
+    logging.info("yt-dlp %s + curl_cffi %s",
+                 _YTDLP_VERSION,
+                 getattr(_yt_curl_cffi, "__version__", "NOT INSTALLED"))
     if _yt_curl_cffi is None:
         logging.warning(
             "yt-dlp browser impersonation is DISABLED: 'curl_cffi' is not installed. "
             "Pornhub requests will be blocked (HTTP 403 / 'Redirection detected'). "
             "Add 'curl_cffi' to requirements.txt and redeploy."
-        )
-    else:
-        logging.info(
-            "yt-dlp browser impersonation available (curl_cffi %s)",
-            getattr(_yt_curl_cffi, "__version__", "?"),
         )
 
 
