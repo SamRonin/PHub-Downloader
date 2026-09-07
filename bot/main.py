@@ -12,6 +12,29 @@ from bot.db import db
 from bot.handlers import start, info, download, admin
 from bot.utils.cleanup import pixeldrain_expiry_loop, temp_cleanup_loop
 
+try:
+    from yt_dlp.dependencies import curl_cffi as _yt_curl_cffi
+except Exception:  # pragma: no cover - very old yt-dlp
+    _yt_curl_cffi = None
+
+
+def check_impersonation() -> None:
+    """Pornhub blocks non-browser HTTP clients. yt-dlp's extractor needs
+    browser impersonation, which requires the optional 'curl_cffi' package.
+    Without it every Pornhub request is redirected/blocked and downloads
+    fail with 'Redirection detected' or HTTP 403."""
+    if _yt_curl_cffi is None:
+        logging.warning(
+            "yt-dlp browser impersonation is DISABLED: 'curl_cffi' is not installed. "
+            "Pornhub requests will be blocked (HTTP 403 / 'Redirection detected'). "
+            "Add 'curl_cffi' to requirements.txt and redeploy."
+        )
+    else:
+        logging.info(
+            "yt-dlp browser impersonation available (curl_cffi %s)",
+            getattr(_yt_curl_cffi, "__version__", "?"),
+        )
+
 
 async def main():
     logging.basicConfig(
@@ -19,6 +42,7 @@ async def main():
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
     logging.getLogger("aiogram.event").setLevel(logging.WARNING)
+    check_impersonation()
 
     os.makedirs(settings.TEMP_DIR, exist_ok=True)
     os.makedirs(os.path.dirname(settings.DB_PATH), exist_ok=True)
