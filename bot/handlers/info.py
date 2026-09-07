@@ -1,3 +1,5 @@
+import logging
+
 from aiogram import Router, F
 from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 
@@ -7,6 +9,7 @@ from bot.utils.i18n import t
 from bot.handlers.cache import info_cache, detect_lang
 
 router = Router(name="info")
+logger = logging.getLogger(__name__)
 
 
 def build_caption(info: dict, lang: str) -> str:
@@ -49,9 +52,13 @@ async def handle_link(message: Message):
     try:
         raw = await extract_info(text.strip())
         info = summarize(raw)
-    except Exception:
+    except Exception as e:
+        # A wrong reply ("invalid link") would be misleading here: the URL may be
+        # perfectly fine while Pornhub blocks/redirects the server (missing
+        # curl_cffi impersonation) or the video is removed/private.
+        logger.warning("Failed to extract info for %s: %s", text.strip(), e)
         try:
-            await status.edit_text(t(lang, "invalid_link"))
+            await status.edit_text(t(lang, "failed"))
         except Exception:
             pass
         return
