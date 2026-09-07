@@ -1,8 +1,8 @@
 import time
 from datetime import datetime, timedelta, timezone
 
-from ..db import db
-from ..utils.i18n import t
+from bot.db import db
+from bot.utils.i18n import t
 
 
 def _fmt_date(ts: int, lang: str) -> str:

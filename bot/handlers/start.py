@@ -2,12 +2,12 @@ from aiogram import Router, Bot
 from aiogram.filters import Command, CommandStart
 from aiogram.types import Message
 
-from ..db import db
-from ..services.referral import register_referral
-from ..services.quota import quota_summary, fmt_quota
-from ..utils.helpers import esc
-from ..utils.i18n import t
-from .cache import detect_lang
+from bot.db import db
+from bot.services.referral import register_referral
+from bot.services.quota import quota_summary, fmt_quota
+from bot.utils.helpers import esc
+from bot.utils.i18n import t
+from bot.handlers.cache import detect_lang
 
 router = Router(name="start")
 

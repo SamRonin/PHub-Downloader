@@ -1,10 +1,10 @@
 from aiogram import Router, F
 from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 
-from ..services.ph import extract_info, summarize
-from ..utils.helpers import esc, is_phub_url
-from ..utils.i18n import t
-from .cache import info_cache, detect_lang
+from bot.services.ph import extract_info, summarize
+from bot.utils.helpers import esc, is_phub_url
+from bot.utils.i18n import t
+from bot.handlers.cache import info_cache, detect_lang
 
 router = Router(name="info")
 

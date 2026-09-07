@@ -14,12 +14,12 @@ from aiogram.types import (
     InlineKeyboardButton,
 )
 
-from ..config import settings
-from ..db import db
-from ..utils.helpers import esc, fmt_size
-from ..utils.i18n import t
-from ..utils.cleanup import delete_pixeldrain_file
-from .start import status_line
+from bot.config import settings
+from bot.db import db
+from bot.utils.helpers import esc, fmt_size
+from bot.utils.i18n import t
+from bot.utils.cleanup import delete_pixeldrain_file
+from bot.handlers.start import status_line
 
 logger = logging.getLogger(__name__)
 router = Router(name="admin")

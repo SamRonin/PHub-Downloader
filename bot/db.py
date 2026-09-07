@@ -2,7 +2,7 @@ import aiosqlite
 import time
 from datetime import datetime, timezone
 
-from ..config import settings
+from bot.config import settings
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS users(

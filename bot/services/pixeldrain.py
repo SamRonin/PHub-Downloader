@@ -1,7 +1,7 @@
 import asyncio
 import httpx
 
-from ..config import settings
+from bot.config import settings
 
 API_BASE = "https://pixeldrain.com/api"
 
