@@ -42,11 +42,24 @@ def pick_qualities(info: dict) -> dict:
 
 
 def format_spec_for(fmt: dict) -> str:
-    """Build a yt-dlp format selector string for the chosen format."""
-    fid = fmt.get("format_id")
-    if fmt.get("vcodec") != "none" and fmt.get("acodec") != "none":
-        return fid
-    return f"{fid}+bestaudio/best"
+    """Return a yt-dlp selector that resolves to the best format at the SAME
+    height as ``fmt``.
+
+    Selecting by *height* instead of the exact format id is required: PornHub
+    varies which representations it serves between requests. Sometimes the
+    page contains direct mp4 formats (ids like ``720p``) and sometimes only
+    HLS variants (ids like ``hls-2512``, same heights). Locking onto a format
+    id taken from an earlier extraction then fails with
+    "Requested format is not available" on the next request.
+    """
+    h = fmt.get("height")
+    if not h:
+        fid = fmt.get("format_id")
+        return fid if fid else "best"
+    return (
+        f"b[height={h}]/bv*[height={h}]+ba/"
+        f"b[height<={h}]/bv*[height<={h}]+ba/b"
+    )
 
 
 def summarize(info: dict) -> dict:

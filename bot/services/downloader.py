@@ -33,6 +33,7 @@ async def download_video(
         "retries": 3,
         "fragment_retries": 3,
         "concurrent_fragment_downloads": 4,
+        "merge_output_format": "mp4",
         "noplaylist": True,
         "progress_hooks": [hook],
     }
