@@ -1,7 +1,9 @@
 import asyncio
 import logging
+import os
+import tempfile
 import time
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import parse_qs, urlsplit, urlunsplit
 
 import yt_dlp
 
@@ -26,6 +28,11 @@ EXTRACT_ATTEMPTS = 4
 
 _PH_APEX_HOSTS = ("pornhub.com", "pornhub.net", "pornhub.org")
 
+_PH_PAGE_HEADERS = {
+    "Accept-Language": "en-US,en;q=0.9",
+    "Referer": "https://www.pornhub.com/",
+}
+
 
 def host_candidates(url: str) -> list[str]:
     """Return [original_url, same_url_with_www/apex_toggled] (deduplicated).
@@ -48,27 +55,116 @@ def host_candidates(url: str) -> list[str]:
     return out
 
 
-def _extract_sync(url: str) -> dict:
-    with yt_dlp.YoutubeDL(_EXTRACT_OPTS) as ydl:
+# ---------------------------------------------------------------------------
+# Cookie warm-up
+#
+# PornHub's anti-bot front door (mostly noticeable from datacenter IPs)
+# answers the FIRST request of a cookie-less session with a redirect. After
+# the visitor's homepage has set its cookies (ua / ss / sessid / bs / …),
+# the video page loads normally. So before extracting we fetch the homepage
+# once and hand those cookies to yt-dlp.
+# ---------------------------------------------------------------------------
+
+def _warm_cookies_file(url: str) -> str | None:
+    """Fetch the PornHub homepage with a fresh browser-impersonating session,
+    export the cookies to a Netscape cookies file and return its path.
+    Returns None if warming is unavailable/failed (caller then retries blind).
+    """
+    try:
+        import curl_cffi.requests as cr
+    except Exception:
+        return None
+    host = urlsplit(host_candidates(url)[0]).netloc
+    try:
+        with cr.Session(impersonate="chrome") as session:
+            resp = session.get(f"https://{host}/", headers=_PH_PAGE_HEADERS, timeout=25)
+            if resp.status_code != 200:
+                return None
+            cookies = list(session.cookies.jar)
+        if not cookies:
+            return None
+        fd, path = tempfile.mkstemp(prefix="ph_cookies_", suffix=".txt")
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write("# Netscape HTTP Cookie File\n")
+            for c in cookies:
+                # format: domain  include_subdomains  path  secure  expires  name  value
+                # A cookie that arrived with a leading-dot domain is a domain
+                # cookie: keep the dot and include_subdomains=TRUE. A host-only
+                # cookie has no dot -> include_subdomains=FALSE. (python's
+                # cookiejar loader is strict about this.)
+                expires = int(c.expires) if c.expires else 0
+                secure = "TRUE" if c.secure else "FALSE"
+                domain = c.domain or host
+                if domain.startswith("."):
+                    include_sub = "TRUE"
+                else:
+                    include_sub = "FALSE"
+                fh.write(
+                    f"{domain}\t{include_sub}\t{c.path or '/'}\t{secure}\t{expires}\t"
+                    f"{c.name}\t{c.value}\n"
+                )
+        logger.info("PornHub warm-up OK: %d cookies -> %s", len(cookies), os.path.basename(path))
+        return path
+    except Exception:
+        logger.debug("PornHub warm-up failed", exc_info=True)
+        return None
+
+
+def _extract_sync(url: str, cookies_file: str | None = None) -> dict:
+    opts = dict(_EXTRACT_OPTS)
+    if cookies_file:
+        opts["cookiefile"] = cookies_file
+    with yt_dlp.YoutubeDL(opts) as ydl:
         return ydl.extract_info(url, download=False)
+
+
+def _probe_redirect_target(url: str) -> str:
+    """After every attempt fails with a redirect, fetch the URL once more with
+    a browser session and describe where it actually went. This turns the
+    generic yt-dlp error into an actionable log line."""
+    try:
+        import curl_cffi.requests as cr
+    except Exception:
+        return "(curl_cffi unavailable for probe)"
+    viewkey = parse_qs(urlsplit(url).query).get("viewkey", [""])[0]
+    host = urlsplit(host_candidates(url)[0]).netloc
+    try:
+        with cr.Session(impersonate="chrome") as session:
+            r = session.get(
+                f"https://{host}/view_video.php?viewkey={viewkey}",
+                headers=_PH_PAGE_HEADERS, timeout=25,
+            )
+        return f"final_url={r.url} status={r.status_code} len={len(r.content)}"
+    except Exception as exc:
+        return f"probe error: {type(exc).__name__}: {str(exc)[:200]}"
 
 
 def _extract_with_retry(url: str, attempts: int = EXTRACT_ATTEMPTS) -> dict:
     candidates = host_candidates(url) or [url]
+    cookies_file = _warm_cookies_file(url)
     last_error: Exception | None = None
-    for attempt in range(attempts):
-        target = candidates[attempt % len(candidates)]
-        try:
-            return _extract_sync(target)
-        except Exception as exc:  # DownloadError/ExtractorError/network…
-            last_error = exc
-            logger.warning(
-                "PornHub extract attempt %d/%d failed (%s): %s",
-                attempt + 1, attempts, target, exc,
-            )
-            if attempt + 1 < attempts:
-                time.sleep(1.5 + attempt * 1.5)
+    try:
+        for attempt in range(attempts):
+            target = candidates[attempt % len(candidates)]
+            try:
+                return _extract_sync(target, cookies_file)
+            except Exception as exc:  # DownloadError/ExtractorError/network…
+                last_error = exc
+                logger.warning(
+                    "PornHub extract attempt %d/%d failed (%s): %s",
+                    attempt + 1, attempts, target, exc,
+                )
+                if attempt + 1 < attempts:
+                    time.sleep(1.5 + attempt * 1.5)
+    finally:
+        if cookies_file:
+            try:
+                os.unlink(cookies_file)
+            except OSError:
+                pass
     assert last_error is not None
+    if "Redirection detected" in str(last_error):
+        logger.warning("PornHub redirect probe: %s", _probe_redirect_target(url))
     raise last_error
 
 
