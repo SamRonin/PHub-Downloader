@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 
-from ..db import db
-from ..utils.helpers import fmt_size
+from bot.db import db
+from bot.utils.helpers import fmt_size
 
 
 async def get_quotas() -> tuple[int, int]:

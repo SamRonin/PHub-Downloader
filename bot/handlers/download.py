@@ -9,15 +9,15 @@ from pathlib import Path
 from aiogram import Router, F, Bot
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, FSInputFile
 
-from ..config import settings
-from ..db import db
-from ..services import pixeldrain
-from ..services.downloader import download_video
-from ..services.quota import check_quota_for_size, get_free_speed_limit, fmt_quota
-from ..utils.cleanup import delete_path
-from ..utils.helpers import fmt_size
-from ..utils.i18n import t
-from .cache import info_cache
+from bot.config import settings
+from bot.db import db
+from bot.services import pixeldrain
+from bot.services.downloader import download_video
+from bot.services.quota import check_quota_for_size, get_free_speed_limit, fmt_quota
+from bot.utils.cleanup import delete_path
+from bot.utils.helpers import fmt_size
+from bot.utils.i18n import t
+from bot.handlers.cache import info_cache
 
 logger = logging.getLogger(__name__)
 router = Router(name="download")

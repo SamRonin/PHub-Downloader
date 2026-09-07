@@ -7,10 +7,10 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.fsm.storage.memory import MemoryStorage
 
-from .config import settings
-from .db import db
-from .handlers import start, info, download, admin
-from .utils.cleanup import pixeldrain_expiry_loop, temp_cleanup_loop
+from bot.config import settings
+from bot.db import db
+from bot.handlers import start, info, download, admin
+from bot.utils.cleanup import pixeldrain_expiry_loop, temp_cleanup_loop
 
 
 async def main():

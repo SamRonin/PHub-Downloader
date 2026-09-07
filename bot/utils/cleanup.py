@@ -4,9 +4,9 @@ import shutil
 import time
 from pathlib import Path
 
-from ..config import settings
-from ..db import db
-from ..services import pixeldrain
+from bot.config import settings
+from bot.db import db
+from bot.services import pixeldrain
 
 logger = logging.getLogger(__name__)
 
