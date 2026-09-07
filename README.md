@@ -34,6 +34,8 @@
 
 ## دیپلوی رایگان روی Railway
 
+> ⚠️ **مهم:** برای دانلود از Pornhub نصب `curl_cffi` الزامی است (در `requirements.txt` هست). Pornhub درخواست‌های غیرمرورگری را بلاک/ری‌دایرکت می‌کند و yt-dlp برای عبور از آن نیاز به impersonation مرورگر دارد که فقط با `curl_cffi` فعال می‌شود. بدون آن خطای `ERROR: [PornHub] ...: Redirection detected; the video may be deleted or require login` (یا HTTP 403) می‌گیرید. بعد از افزودن این پکیج حتماً دیپلوی تازه (بدون کش) انجام بده.
+
 1. **آپلود روی GitHub**: این پوشه را به یک ریپازیتوری GitHub بفرست (ترجیحاً Private).
 
 2. **ساخت پروژه در Railway**: به [railway.app](https://railway.app) برو → `New Project` → `Deploy from GitHub repo` → ریپو را انتخاب کن. Railway به‌صورت خودکار `railway.json` و `nixpacks.toml` را می‌خواند (شامل ffmpeg برای yt-dlp).
