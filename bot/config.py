@@ -1,5 +1,6 @@
 import os
 import sys
+import tempfile
 
 
 def _parse_admin_ids(raw: str):
@@ -26,7 +27,14 @@ class Settings:
             raise SystemExit(1)
 
         self.DB_PATH = _pick_path("DB_PATH", "phdownloader.db")
-        self.TEMP_DIR = os.getenv("TEMP_DIR", os.path.join(os.path.dirname(self.DB_PATH), "tmp"))
+        # Downloads NEVER go on the mounted volume. TEMP_DIR is scratch space
+        # (video files can be >1 GB) and must live on Railway's own ephemeral
+        # disk — the /data volume is reserved for the database and user data
+        # only. Default: a dedicated dir in the container's temp area; the
+        # TEMP_DIR env var still overrides it if you want scratch elsewhere.
+        self.TEMP_DIR = os.getenv("TEMP_DIR") or os.path.join(
+            tempfile.gettempdir(), "phub_dl"
+        )
 
         self.DAILY_QUOTA_FREE = int(float(os.getenv("DAILY_QUOTA_FREE_MB", "500"))) * 1024 * 1024
         self.DAILY_QUOTA_PRO = int(float(os.getenv("DAILY_QUOTA_PRO_MB", "2048"))) * 1024 * 1024
