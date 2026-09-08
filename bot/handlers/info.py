@@ -13,7 +13,7 @@ from aiogram.types import (
 )
 from PIL import Image
 
-from bot.services.ph import extract_info, summarize
+from bot.services.ph import PornHubBlockedError, extract_info, summarize
 from bot.utils.helpers import esc, is_phub_url
 from bot.utils.i18n import t
 from bot.handlers.cache import info_cache, detect_lang
@@ -165,6 +165,15 @@ async def handle_link(message: Message):
     try:
         raw = await extract_info(text.strip())
         info = summarize(raw)
+    except PornHubBlockedError as e:
+        # The video is fine; the server's egress IP is being bounced by
+        # PornHub. Tell the user (and log it) instead of a generic failure.
+        logger.error("PornHub BLOCKED for %s: %s", text.strip(), e)
+        try:
+            await status.edit_text(t(lang, "ph_blocked"))
+        except Exception:
+            pass
+        return
     except Exception as e:
         # A wrong reply ("invalid link") would be misleading here: the URL may be
         # perfectly fine while Pornhub blocks/redirects the server (missing

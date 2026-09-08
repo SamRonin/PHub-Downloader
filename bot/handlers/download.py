@@ -13,6 +13,7 @@ from bot.config import settings
 from bot.db import db
 from bot.services import pixeldrain
 from bot.services.downloader import download_video
+from bot.services.ph import PornHubBlockedError
 from bot.services.quota import check_quota_for_size, get_free_speed_limit, fmt_quota
 from bot.utils.cleanup import delete_path
 from bot.utils.helpers import fmt_size
@@ -170,6 +171,16 @@ async def cb_download(cq: CallbackQuery, bot: Bot):
         except Exception:
             pass
 
+    except PornHubBlockedError:
+        logger.error("PornHub BLOCKED for download (user %s)", cq.from_user.id)
+        stop.set()
+        if status_msg:
+            try:
+                await bot.edit_message_text(
+                    t(lang, "ph_blocked"), chat_id=cq.from_user.id, message_id=status_msg.message_id
+                )
+            except Exception:
+                pass
     except Exception as e:
         logger.exception("Download failed for user %s", cq.from_user.id)
         stop.set()
