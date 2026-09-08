@@ -11,6 +11,7 @@ from bot.services.ph import (
     PornHubBlockedError,
     _apex_of,
     _warm_cookies_for_apex,
+    apply_browser_opts,
     attempt_targets,
     canonical_view_url,
     get_proxy,
@@ -24,10 +25,17 @@ logger = logging.getLogger(__name__)
 # to the CDN that never answers, with no socket timeout configured).
 _DOWNLOAD_SOCKET_TIMEOUT = 30
 
-# Prefer plain https mp4 streams over HLS (fewer moving parts, reliable
-# progress, resume-friendly). Falls back to HLS automatically when no direct
-# mp4 exists.
-_DOWNLOAD_FORMAT_SORT = ["proto:https", "tbr"]
+# NOTE on speed (no format_sort here — deliberately):
+# We do NOT set yt-dlp's ``format_sort``. PornHub serves the same quality as a
+# single progressive ``https`` mp4 AND as an HLS (``m3u8_native``) stream. The
+# progressive file comes off a single throttled connection (~0.5-0.6 MB/s),
+# while the HLS stream is downloaded as parallel fragments
+# (``concurrent_fragment_downloads``) at the full CDN rate (~20+ MB/s; a
+# 300 MB file in ~20 s). yt-dlp's *default* sort picks the HLS stream for the
+# chosen height, so overriding ``format_sort`` to prefer ``proto:https`` (as
+# an earlier revision did) is exactly what made downloads crawl. We therefore
+# leave the default in place — same choice as the stable MZ-Downloader.
+_DOWNLOAD_FRAGMENT_WORKERS = 4
 
 # A download attempt that fails its network calls (bounce, timeout, CDN error)
 # can retry on another host/page, but we cap the total so a flagged IP can't
@@ -103,13 +111,16 @@ async def download_video(
             "noprogress": True,
             "retries": 2,
             "fragment_retries": 3,
-            "concurrent_fragment_downloads": 4,
+            "concurrent_fragment_downloads": _DOWNLOAD_FRAGMENT_WORKERS,
+            # 1 MiB I/O buffer — far fewer syscalls on large files than the
+            # tiny default, same as MZ-Downloader.
+            "buffersize": 1024 * 1024,
             "socket_timeout": _DOWNLOAD_SOCKET_TIMEOUT,
-            "format_sort": _DOWNLOAD_FORMAT_SORT,
             "merge_output_format": "mp4",
             "noplaylist": True,
             "progress_hooks": [hook],
         }
+        apply_browser_opts(opts)
         if cookies_file:
             opts["cookiefile"] = cookies_file
         proxy = get_proxy()

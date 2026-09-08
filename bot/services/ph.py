@@ -55,6 +55,32 @@ _EXTRACT_OPTS = {
     "retries": 3,
 }
 
+#: Browser-like User-Agent for every PornHub-facing request (the mirror of
+#: what the stable MZ-Downloader sends to yt-dlp). PornHub serves different
+#: (and slower/throttled) content to clients that do not look like a browser.
+_CHROME_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+)
+
+
+def apply_browser_opts(opts: dict) -> dict:
+    """Make a yt-dlp options dict look like a desktop Chrome visitor.
+
+    Mirrors MZ-Downloader's ``social_gateway``: a Chrome UA header plus
+    curl_cffi impersonation (when the running yt-dlp supports it). This is
+    applied to BOTH extraction and download so the whole request chain
+    presents as one browser client.
+    """
+    opts.setdefault("http_headers", {})["User-Agent"] = _CHROME_UA
+    try:
+        from yt_dlp.networking.impersonate import ImpersonateTarget
+
+        opts["impersonate"] = ImpersonateTarget(client="chrome")
+    except Exception:
+        opts["impersonate"] = "chrome"
+    return opts
+
 #: Upper bound on page fetches per request before giving up. Enough to cover
 #: the host/page matrix without hammering a flagged IP.
 MAX_ATTEMPTS = 10
@@ -237,7 +263,7 @@ def warm_cookies_file(url: str) -> str | None:
 # --------------------------------------------------------------------------
 
 def _extract_sync(url: str, cookies_file: str | None = None) -> dict:
-    opts = dict(_EXTRACT_OPTS)
+    opts = apply_browser_opts(dict(_EXTRACT_OPTS))
     if cookies_file:
         opts["cookiefile"] = cookies_file
     proxy = get_proxy()
