@@ -29,6 +29,24 @@ def ref_bot_link(username: str, user_id: int) -> str:
     return f"https://t.me/{username}?start=ref_{user_id}"
 
 
+def _start_block(
+    user, lang: str, name: str, quota: str, link: str, ref_needed: int, pro_days: int
+) -> str:
+    return t(
+        lang,
+        "start",
+        name=name,
+        quota=quota,
+        status=status_line(user, lang),
+        ref_needed=ref_needed,
+        pro_days=pro_days,
+        ref_link=link,
+    )
+
+
+_DIVIDER = "\n\n• • •\n\n"
+
+
 @router.message(CommandStart())
 async def cmd_start(message: Message, bot: Bot):
     tg_user = message.from_user
@@ -58,20 +76,26 @@ async def cmd_start(message: Message, bot: Bot):
         me = await bot.me()
         link = ref_bot_link(me.username, tg_user.id)
     except Exception:
-        link = ref_link(tg_user.id)
+        link = ""
 
     summary = await quota_summary(user)
+    name = esc(tg_user.first_name or "User")
+    quota = fmt_quota(summary["quota"])
+    ref_needed = int(await db.get_setting("referrals_for_pro"))
+    pro_days = int(await db.get_setting("pro_days"))
+
+    # The start screen is always bilingual (Persian + English) so both groups
+    # are welcomed. The user's own language is shown first.
+    primary = (user["lang"] if user and user.get("lang") else lang) or "fa"
+    blocks = (
+        [_start_block(user, "fa", name, quota, link, ref_needed, pro_days),
+         _start_block(user, "en", name, quota, link, ref_needed, pro_days)]
+        if primary == "fa"
+        else [_start_block(user, "en", name, quota, link, ref_needed, pro_days),
+              _start_block(user, "fa", name, quota, link, ref_needed, pro_days)]
+    )
     await message.answer(
-        t(
-            lang,
-            "start",
-            name=esc(tg_user.first_name or "User"),
-            quota=fmt_quota(summary["quota"]),
-            status=status_line(user, lang),
-            ref_needed=int(await db.get_setting("referrals_for_pro")),
-            pro_days=int(await db.get_setting("pro_days")),
-            ref_link=link,
-        ),
+        _DIVIDER.join(blocks),
         disable_web_page_preview=True,
     )
 
@@ -93,7 +117,11 @@ async def cmd_lang(message: Message):
 
 @router.message(Command("help"))
 async def cmd_help(message: Message):
-    lang = detect_lang(message.from_user.language_code)
+    user = await db.get_user(message.from_user.id)
+    if user and user.get("lang"):
+        lang = user["lang"]
+    else:
+        lang = detect_lang(message.from_user.language_code)
     await message.answer(t(lang, "help"), disable_web_page_preview=True)
 
 

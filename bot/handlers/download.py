@@ -31,13 +31,17 @@ _safe_name_re = re.compile(r"[^A-Za-z0-9._-]+")
 async def _progress_editor(
     bot: Bot, chat_id: int, message_id: int, state: dict, lang: str, stop: asyncio.Event
 ):
-    key = "downloading" if state["phase"] == "download" else "uploading"
+    _PHASE_KEY = {"download": "downloading", "upload": "uploading"}
     last_pct = -1
+    last_phase = None
     try:
         while not stop.is_set():
+            phase = state["phase"]
             pct = state["pct"]
-            if pct != last_pct:
+            if phase != last_phase or pct != last_pct:
+                last_phase = phase
                 last_pct = pct
+                key = _PHASE_KEY.get(phase, "sending")
                 try:
                     await bot.edit_message_text(
                         t(lang, key, pct=pct), chat_id=chat_id, message_id=message_id
@@ -45,7 +49,7 @@ async def _progress_editor(
                 except Exception:
                     pass
             try:
-                await asyncio.wait_for(stop.wait(), timeout=15)
+                await asyncio.wait_for(stop.wait(), timeout=3)
             except asyncio.TimeoutError:
                 pass
     except asyncio.CancelledError:
@@ -112,8 +116,9 @@ async def cb_download(cq: CallbackQuery, bot: Bot):
         async with sem:
             url = info.get("webpage_url")
             fmt_spec = q.get("format_spec") or str(q["format_id"])
-            path, dl_state = await download_video(url, fmt_spec, task_dir, rate_limit)
-            state["pct"] = dl_state["pct"]
+            # state is passed in so download_video updates the SAME dict the
+            # editor is watching — otherwise the Telegram message sits at 0%.
+            path, _ = await download_video(url, fmt_spec, task_dir, rate_limit, state)
 
         size = path.stat().st_size
         delivered = "telegram"

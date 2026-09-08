@@ -17,6 +17,7 @@ from bot.services.ph import PornHubBlockedError, extract_info, summarize
 from bot.utils.helpers import esc, is_phub_url
 from bot.utils.i18n import t
 from bot.handlers.cache import info_cache, detect_lang
+from bot.db import db
 
 router = Router(name="info")
 logger = logging.getLogger(__name__)
@@ -160,7 +161,13 @@ async def handle_link(message: Message):
     text = message.text or ""
     if not is_phub_url(text):
         return
-    lang = detect_lang(message.from_user.language_code)
+    # Respect the language the user picked (/lang) — a Persian user whose
+    # Telegram UI is English used to get the whole card in English.
+    user = await db.get_user(message.from_user.id)
+    if user and user.get("lang"):
+        lang = user["lang"]
+    else:
+        lang = detect_lang(message.from_user.language_code)
     status = await message.answer(t(lang, "fetching"))
     try:
         raw = await extract_info(text.strip())
