@@ -379,6 +379,8 @@ def summarize(info: dict) -> dict:
             "size_str": fmt_size(size),
             "format_id": f.get("format_id"),
             "format_spec": format_spec_for(f),
+            "protocol": f.get("protocol"),
+            "tbr": f.get("tbr"),  # kbps — used to estimate big-file size
         }
     return {
         "id": info.get("id"),
