@@ -202,16 +202,19 @@ async def cb_download(cq: CallbackQuery, bot: Bot):
         # --- Pixeldrain delivery result (streamed or uploaded) ---
         if delivered == "pixeldrain" and file_id:
             minutes = int(await db.get_setting("px_delete_minutes"))
+            # The message shows no raw URL anymore and the button opens the
+            # Pixeldrain *page* (watch + download work there for free users).
+            # The old "direct download" API link was returned by Pixeldrain as
+            # hotlink_detected for free accounts, so it was removed.
             await bot.send_message(
                 cq.from_user.id,
-                t(lang, "done_link", quality=height, size=fmt_size(size),
-                  link=pixeldrain.file_page_url(file_id), minutes=minutes),
+                t(lang, "done_link", quality=height, size=fmt_size(size), minutes=minutes),
                 reply_markup=InlineKeyboardMarkup(
                     inline_keyboard=[
                         [
                             InlineKeyboardButton(
-                                text=t(lang, "direct_btn"),
-                                url=pixeldrain.file_direct_url(file_id),
+                                text=t(lang, "page_btn"),
+                                url=pixeldrain.file_page_url(file_id),
                             )
                         ]
                     ]
