@@ -31,6 +31,7 @@
 | `REFERRALS_FOR_PRO` | ❌ | تعداد رفرال برای گرفتن Pro (پیش‌فرض 2) |
 | `PRO_DAYS` | ❌ | مدت اشتراک Pro (پیش‌فرض 30) |
 | `MAX_CONCURRENT_DOWNLOADS` | ❌ | حداکثر دانلود همزمان روی سرور (پیش‌فرض 3) |
+| `PH_PROXY` | ❌ | پروکسی برای ترافیک Pornhub وقتی IP ریلی‌وی بلاک/ری‌دایرکت می‌شود (مثل `http://user:pass@host:port` یا `socks5://host:port`) |
 
 ## دیپلوی رایگان روی Railway
 
