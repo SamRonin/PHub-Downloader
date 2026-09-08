@@ -71,14 +71,41 @@ async def download_video(
     format_spec: str,
     out_dir: str,
     rate_limit: int | None = None,
+    state: dict | None = None,
 ) -> tuple[Path, dict]:
     """Download a video, returns (file_path, progress_state).
 
-    progress_state = {"phase": "download", "pct": 0-100}
+    ``state`` is optional and, when given, is the SAME dict the caller keeps —
+    its ``pct``/``phase`` are updated live so the caller can show real progress
+    (the Telegram message used to sit at 0% because the handler never saw the
+    internal state). progress_state = {"phase": "download", "pct": 0-100}.
     """
-    state = {"phase": "download", "pct": 0}
+    if state is None:
+        state = {"phase": "download", "pct": 0}
+    else:
+        state["phase"] = "download"
+        state["pct"] = 0
     out_dir_p = Path(out_dir)
     last_logged_pct = -1
+    # PornHub's HLS stream does not report a total size, only a fragment
+    # counter — track the highest finished fragment so the percent advances.
+    max_fragment = 0
+
+    def _percent(d: dict) -> int | None:
+        """Percent for a yt-dlp ``downloading`` event, or None when nothing
+        measurable happened yet (keep the previous value then)."""
+        nonlocal max_fragment
+        total = d.get("total_bytes") or 0
+        done = d.get("downloaded_bytes") or 0
+        if total and done:
+            return min(int(done * 100 / total), 99)
+        # HLS: no total_bytes; use the finished-fragment counter.
+        frag = d.get("fragment_index") or 0
+        frag_total = d.get("fragment_count") or 0
+        if frag > 0 and frag_total > 0:
+            max_fragment = max(max_fragment, frag)
+            return min(int(max_fragment * 100 / frag_total), 99)
+        return None
 
     def hook(d):
         nonlocal last_logged_pct
@@ -89,18 +116,24 @@ async def download_video(
             return
         if status != _STATUS_DOWNLOADING:
             return
-        total = d.get("total_bytes") or d.get("total_bytes_estimate") or 0
-        done = d.get("downloaded_bytes", 0)
-        if not total:
+        pct = _percent(d)
+        if pct is None:
             return
-        pct = min(int(done * 100 / total), 99)
-        state["pct"] = pct
+        if pct > state["pct"]:
+            state["pct"] = pct
         # Log progress every ~10% so the Railway log shows the download is
         # actually moving (yt-dlp itself is configured quiet).
-        if pct >= last_logged_pct + 10 or (pct == 0 and last_logged_pct == -1):
-            last_logged_pct = pct
-            logger.info("Downloading... %d%% (%s of %s)",
-                        pct, _human(done), _human(total))
+        if state["pct"] >= last_logged_pct + 10 or (
+            state["pct"] == 0 and last_logged_pct == -1
+        ):
+            last_logged_pct = state["pct"]
+            logger.info(
+                "Downloading... %d%% (%s downloaded, frag %s/%s)",
+                state["pct"],
+                _human(d.get("downloaded_bytes")),
+                d.get("fragment_index") or 0,
+                d.get("fragment_count") or 0,
+            )
 
     def _build_opts(cookies_file: str | None) -> dict:
         opts = {
