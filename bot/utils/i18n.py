@@ -46,10 +46,10 @@ STRINGS = {
         "done_direct": "✅ دانلود کامل شد!\n🎬 کیفیت: <b>{quality}p</b>\n📦 حجم: <b>{size}</b>",
         "done_link": (
             "✅ آماده شد!\n🎬 کیفیت: <b>{quality}p</b>\n📦 حجم: <b>{size}</b>\n\n"
-            "⬇️ <b>لینک دانلود:</b>\n{link}\n\n"
-            "🗑 این لینک تا <b>{minutes}</b> دقیقه دیگر به‌صورت خودکار حذف می‌شود."
+            "🌐 برای تماشا یا دانلود، دکمه‌ی زیر را بزن.\n\n"
+            "🗑 فایل تا <b>{minutes}</b> دقیقه‌ی دیگر از Pixeldrain حذف می‌شود."
         ),
-        "direct_btn": "⬇️ دانلود مستقیم",
+        "page_btn": "🌐 مشاهده / دانلود در Pixeldrain",
         "failed": "❌ خطا در دانلود. لطفاً بعداً دوباره امتحان کن.",
         "ph_blocked": (
             "⛔ PornHub فعلاً درخواست‌های سرور ما را محدود کرده "
@@ -157,10 +157,10 @@ STRINGS = {
         "done_direct": "✅ Done!\n🎬 Quality: <b>{quality}p</b>\n📦 Size: <b>{size}</b>",
         "done_link": (
             "✅ Ready!\n🎬 Quality: <b>{quality}p</b>\n📦 Size: <b>{size}</b>\n\n"
-            "⬇️ <b>Download link:</b>\n{link}\n\n"
-            "🗑 This link will be auto-deleted in <b>{minutes}</b> minutes."
+            "🌐 Tap the button below to watch or download.\n\n"
+            "🗑 The file will be auto-deleted from Pixeldrain in <b>{minutes}</b> minutes."
         ),
-        "direct_btn": "⬇️ Direct download",
+        "page_btn": "🌐 Watch / download on Pixeldrain",
         "failed": "❌ Download failed. Please try again later.",
         "ph_blocked": (
             "⛔ PornHub is temporarily blocking this server's IP "
