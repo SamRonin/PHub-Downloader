@@ -51,6 +51,11 @@ STRINGS = {
         ),
         "direct_btn": "⬇️ دانلود مستقیم",
         "failed": "❌ خطا در دانلود. لطفاً بعداً دوباره امتحان کن.",
+        "ph_blocked": (
+            "⛔ PornHub فعلاً درخواست‌های سرور ما را محدود کرده "
+            "(IP سرور موقتاً مسدود شده). لینک ویدیو سالم است.\n"
+            "لطفاً چند دقیقه بعد دوباره امتحان کن. اگه باز هم نشد، به ادمین بگو."
+        ),
         "too_big": "❌ حجم این ویدیو از حد مجاز ({max}) بیشتر است.",
         "views": "👀 {n} بازدید",
         "sizes_header": "📦 حجم هر کیفیت:",
@@ -157,6 +162,11 @@ STRINGS = {
         ),
         "direct_btn": "⬇️ Direct download",
         "failed": "❌ Download failed. Please try again later.",
+        "ph_blocked": (
+            "⛔ PornHub is temporarily blocking this server's IP "
+            "(the video link itself is fine).\n"
+            "Please try again in a few minutes. If it persists, tell the admin."
+        ),
         "too_big": "❌ This video exceeds the maximum allowed size ({max}).",
         "views": "👀 {n} views",
         "sizes_header": "📦 Available sizes:",
