@@ -40,6 +40,32 @@ def check_impersonation() -> None:
         )
 
 
+def _log_egress_ip() -> None:
+    """Log the outbound public IP once at startup.
+
+    Railway egress IPs vary between deployments and some are flagged by
+    PornHub (which then answers with a redirect). Knowing the exact IP of a
+    "working" vs a "failing" deploy makes it obvious whether that is the
+    cause — and lets you compare with whatever IP runs main.py.
+    """
+    import json
+    import urllib.request
+
+    for url in ("https://ipinfo.io/json", "https://api.ipify.org?format=json"):
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "curl/8.4.0"})
+            with urllib.request.urlopen(req, timeout=8) as resp:
+                payload = json.loads(resp.read().decode("utf-8", "replace"))
+            ip = payload.get("ip")
+            if ip:
+                org = payload.get("org") or payload.get("as") or ""
+                logging.info("Egress IP: %s %s (source %s)", ip, org, url.split("/")[2])
+                return
+        except Exception:
+            continue
+    logging.warning("Could not determine egress IP")
+
+
 async def main():
     logging.basicConfig(
         level=logging.INFO,
@@ -47,6 +73,7 @@ async def main():
     )
     logging.getLogger("aiogram.event").setLevel(logging.WARNING)
     check_impersonation()
+    await asyncio.to_thread(_log_egress_ip)
 
     os.makedirs(settings.TEMP_DIR, exist_ok=True)
     os.makedirs(os.path.dirname(settings.DB_PATH), exist_ok=True)
