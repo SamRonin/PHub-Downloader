@@ -66,6 +66,60 @@ def _log_egress_ip() -> None:
     logging.warning("Could not determine egress IP")
 
 
+def _ph_health_check() -> None:
+    """At startup, test PornHub reachability from *this* deployment's IP.
+
+    Railway gives every deployment a (sometimes flagged) egress IP. This check
+    makes the verdict visible in the logs immediately, so a failing deploy is
+    obviously "the IP is blocked" instead of a confusing per-video error.
+    """
+    from bot.services.ph import get_proxy
+
+    try:
+        import curl_cffi.requests as cr
+    except Exception:
+        logging.warning("PornHub health check skipped (curl_cffi missing)")
+        return
+
+    kwargs = {"impersonate": "chrome", "timeout": 15}
+    proxy = get_proxy()
+    if proxy:
+        kwargs["proxies"] = {"http": proxy, "https": proxy}
+        logging.info("PornHub traffic routed via proxy: %s", proxy.split("@")[-1])
+
+    viewkey = "6a430c07e9be0"  # any live video id — only used for the probe
+    try:
+        with cr.Session(**kwargs) as s:
+            r = s.get("https://www.pornhub.com/", headers={"Accept-Language": "en-US,en;q=0.9"})
+            homepage = f"homepage HTTP {r.status_code}"
+            try:
+                v = s.get(
+                    f"https://www.pornhub.com/view_video.php?viewkey={viewkey}",
+                    headers={"Accept-Language": "en-US,en;q=0.9"},
+                )
+                ok = v.status_code == 200 and f"viewkey={viewkey}" in str(v.url)
+                video = f"video HTTP {v.status_code} final={v.url}"
+            except Exception as exc:
+                ok = False
+                video = f"video error: {type(exc).__name__}: {str(exc)[:120]}"
+    except Exception as exc:
+        logging.warning(
+            "PornHub health check failed (%s) — check network/proxy",
+            f"{type(exc).__name__}: {str(exc)[:120]}",
+        )
+        return
+
+    if ok:
+        logging.info("PornHub reachable from this deploy: OK (%s)", homepage)
+    else:
+        logging.error(
+            "PornHub BLOCKED from this deploy (%s; %s). The videos are fine — "
+            "this server IP is being bounced. Fix: redeploy (fresh egress IP), "
+            "change the Railway region, or set PH_PROXY to a proxy on a clean IP.",
+            homepage, video,
+        )
+
+
 async def main():
     logging.basicConfig(
         level=logging.INFO,
@@ -74,6 +128,7 @@ async def main():
     logging.getLogger("aiogram.event").setLevel(logging.WARNING)
     check_impersonation()
     await asyncio.to_thread(_log_egress_ip)
+    await asyncio.to_thread(_ph_health_check)
 
     os.makedirs(settings.TEMP_DIR, exist_ok=True)
     os.makedirs(os.path.dirname(settings.DB_PATH), exist_ok=True)
