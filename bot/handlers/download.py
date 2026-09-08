@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import re
+import shutil
 import tempfile
 import time
 import uuid
@@ -13,6 +14,7 @@ from bot.config import settings
 from bot.db import db
 from bot.services import pixeldrain
 from bot.services.downloader import download_video
+from bot.services.hls_stream import try_stream_to_pixeldrain
 from bot.services.ph import PornHubBlockedError
 from bot.services.quota import check_quota_for_size, get_free_speed_limit, fmt_quota
 from bot.utils.cleanup import delete_path
@@ -26,6 +28,28 @@ router = Router(name="download")
 sem = asyncio.Semaphore(settings.MAX_CONCURRENT_DOWNLOADS)
 busy_users: set[int] = set()
 _safe_name_re = re.compile(r"[^A-Za-z0-9._-]+")
+
+# When a big file would not fit comfortably in the free-tier 1 GB ephemeral
+# disk, stream it straight to Pixeldrain instead of staging it locally.
+_DISK_HEADROOM = 96 * 1024 * 1024  # keep ~100 MB free for the DB / other tasks
+
+
+def _free_disk_bytes() -> int | None:
+    try:
+        d = Path(settings.TEMP_DIR)
+        d.mkdir(parents=True, exist_ok=True)
+        return shutil.disk_usage(d).free
+    except Exception:
+        return None
+
+
+def _estimated_size(info: dict, height: int) -> int | None:
+    """Approximate size (bytes) from duration × bitrate, or None when unknown."""
+    dur = info.get("duration") or 0
+    tbr = (info.get("qualities") or {}).get(height, {}).get("tbr") or 0
+    if not dur or not tbr:
+        return None
+    return int(dur * tbr * 1000 / 8)
 
 
 async def _progress_editor(
@@ -112,38 +136,71 @@ async def cb_download(cq: CallbackQuery, bot: Bot):
         is_pro = bool(user["is_pro"] and user["pro_until"] > int(time.time()))
         rate_limit = None if is_pro else await get_free_speed_limit()
 
-        task_dir = tempfile.mkdtemp(prefix=f"dl_{cq.from_user.id}_", dir=settings.TEMP_DIR)
-        async with sem:
-            url = info.get("webpage_url")
-            fmt_spec = q.get("format_spec") or str(q["format_id"])
-            # state is passed in so download_video updates the SAME dict the
-            # editor is watching — otherwise the Telegram message sits at 0%.
-            path, _ = await download_video(url, fmt_spec, task_dir, rate_limit, state)
+        url = info.get("webpage_url")
+        fmt_spec = q.get("format_spec") or str(q["format_id"])
+        path: Path | None = None
+        file_id: str | None = None
+        size: int | None = None
+        delivered: str | None = None
 
-        size = path.stat().st_size
-        delivered = "telegram"
-
-        if size <= settings.TELEGRAM_LIMIT:
-            state["phase"] = "send"
-            try:
-                await bot.edit_message_text(
-                    t(lang, "sending"), chat_id=cq.from_user.id, message_id=status_msg.message_id
-                )
-            except Exception:
-                pass
-            await bot.send_video(
-                cq.from_user.id,
-                video=FSInputFile(path),
-                caption=t(lang, "done_direct", quality=height, size=fmt_size(size)),
-                supports_streaming=True,
-            )
-        else:
-            state["phase"] = "upload"
+        # --- Streaming path: big files (Pixeldrain-bound anyway) that would
+        # not fit safely in the 1 GB ephemeral disk are streamed straight from
+        # PornHub to Pixeldrain, never staged on the local disk.
+        est = _estimated_size(info, height)
+        free = _free_disk_bytes()
+        if est and est > settings.TELEGRAM_LIMIT and free and free < est + _DISK_HEADROOM:
             safe_name = _safe_name_re.sub("_", f"{info.get('id') or 'video'}_{height}p")[:80]
-            safe_name += path.suffix or ".mp4"
-            file_id = await pixeldrain.upload_file(str(path), safe_name, state)
-            await db.record_upload(cq.from_user.id, file_id, size)
-            delivered = "pixeldrain"
+            safe_name += ".mp4"
+            logger.info(
+                "Streaming %dp direct to Pixeldrain (est %s, disk free %s)",
+                height, fmt_size(est), fmt_size(free),
+            )
+            state["phase"] = "upload"
+            async with sem:
+                streamed = await try_stream_to_pixeldrain(
+                    url, height, safe_name, state, rate_limit or 0
+                )
+            if streamed:
+                file_id, size = streamed
+                delivered = "pixeldrain"
+                await db.record_upload(cq.from_user.id, file_id, size)
+                logger.info("Streamed upload OK for user %s", cq.from_user.id)
+
+        # --- Classic path: stage locally (small files, or when streaming was
+        # not possible / not needed).
+        if delivered is None:
+            task_dir = tempfile.mkdtemp(prefix=f"dl_{cq.from_user.id}_", dir=settings.TEMP_DIR)
+            async with sem:
+                # state is passed in so download_video updates the SAME dict
+                # the editor is watching — the chat % used to sit at 0%.
+                path, _ = await download_video(url, fmt_spec, task_dir, rate_limit, state)
+            size = path.stat().st_size
+
+            if size <= settings.TELEGRAM_LIMIT:
+                delivered = "telegram"
+                state["phase"] = "send"
+                try:
+                    await bot.edit_message_text(
+                        t(lang, "sending"), chat_id=cq.from_user.id, message_id=status_msg.message_id
+                    )
+                except Exception:
+                    pass
+                await bot.send_video(
+                    cq.from_user.id,
+                    video=FSInputFile(path),
+                    caption=t(lang, "done_direct", quality=height, size=fmt_size(size)),
+                    supports_streaming=True,
+                )
+            else:
+                state["phase"] = "upload"
+                safe_name = _safe_name_re.sub("_", f"{info.get('id') or 'video'}_{height}p")[:80]
+                safe_name += path.suffix or ".mp4"
+                file_id = await pixeldrain.upload_file(str(path), safe_name, state)
+                await db.record_upload(cq.from_user.id, file_id, size)
+                delivered = "pixeldrain"
+
+        # --- Pixeldrain delivery result (streamed or uploaded) ---
+        if delivered == "pixeldrain" and file_id:
             minutes = int(await db.get_setting("px_delete_minutes"))
             await bot.send_message(
                 cq.from_user.id,
@@ -162,7 +219,8 @@ async def cb_download(cq: CallbackQuery, bot: Bot):
                 disable_web_page_preview=True,
             )
 
-        await db.record_download(cq.from_user.id, str(height), size, delivered)
+        if delivered:
+            await db.record_download(cq.from_user.id, str(height), size or 0, delivered)
         state["pct"] = 100
         stop.set()
         try:
