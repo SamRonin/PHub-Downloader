@@ -5,7 +5,7 @@ from aiogram.types import Message
 from bot.db import db
 from bot.services.referral import register_referral
 from bot.services.quota import quota_summary, fmt_quota
-from bot.utils.helpers import esc
+from bot.utils.helpers import esc, row_get
 from bot.utils.i18n import t
 from bot.handlers.cache import detect_lang
 
@@ -86,7 +86,7 @@ async def cmd_start(message: Message, bot: Bot):
 
     # The start screen is always bilingual (Persian + English) so both groups
     # are welcomed. The user's own language is shown first.
-    primary = (user["lang"] if user and user.get("lang") else lang) or "fa"
+    primary = (row_get(user, "lang") or lang) or "fa"
     blocks = (
         [_start_block(user, "fa", name, quota, link, ref_needed, pro_days),
          _start_block(user, "en", name, quota, link, ref_needed, pro_days)]
@@ -118,10 +118,7 @@ async def cmd_lang(message: Message):
 @router.message(Command("help"))
 async def cmd_help(message: Message):
     user = await db.get_user(message.from_user.id)
-    if user and user.get("lang"):
-        lang = user["lang"]
-    else:
-        lang = detect_lang(message.from_user.language_code)
+    lang = row_get(user, "lang") or detect_lang(message.from_user.language_code)
     await message.answer(t(lang, "help"), disable_web_page_preview=True)
 
 
