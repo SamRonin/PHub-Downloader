@@ -23,9 +23,9 @@ _EXTRACT_OPTS = {
 }
 
 # How many times to re-run an extraction when PornHub serves a redirect /
-# bot-check / transient error page. With the 3 mirror TLDs + www variants
-# there can be up to 6 distinct hosts, so try up to 6 times.
-EXTRACT_ATTEMPTS = 6
+# bot-check / transient error page. With 3 mirror TLDs + www variants plus the
+# /embed/ fallback, up to ~12 URLs can be tried before giving up.
+EXTRACT_ATTEMPTS = 12
 
 _PH_APEX_HOSTS = ("pornhub.com", "pornhub.net", "pornhub.org")
 
@@ -175,23 +175,88 @@ def _probe_redirect_target(url: str) -> str:
         return f"probe error: {type(exc).__name__}: {str(exc)[:200]}"
 
 
+def _embed_url(url: str) -> str | None:
+    """Convert a ``view_video.php?viewkey=X`` URL to the embed-page URL
+    (``/embed/X``) on the SAME host, or None if not applicable."""
+    parts = urlsplit(url)
+    viewkey = parse_qs(parts.query).get("viewkey", [""])[0]
+    if not viewkey or "view_video.php" not in parts.path:
+        return None
+    return urlunsplit((parts.scheme, parts.netloc, f"/embed/{viewkey}", "", ""))
+
+
+def embed_candidates(url: str) -> list[str]:
+    """Embed-page URLs on the same host candidates (see host_candidates).
+
+    PornHub's anti-bot bounce redirects the full ``view_video.php`` page to
+    the homepage for flagged IPs, but the embed/player page is served by a
+    different route and often still works. Same viewkey, same video info.
+    """
+    base = host_candidates(url) or [url]
+    out: list[str] = []
+    for c in base:
+        e = _embed_url(c)
+        if e and e not in out:
+            out.append(e)
+    return out
+
+
+def is_bounce_error(exc: Exception) -> bool:
+    """True when the error looks like an anti-bot / access bounce rather than
+    a genuine "video is gone" answer."""
+    text = str(exc)
+    return (
+        "Redirection detected" in text
+        or "HTTP Error 403" in text
+        or "HTTP Error 429" in text
+        or "Unable to download webpage" in text
+    )
+
+
 def _extract_with_retry(url: str, attempts: int = EXTRACT_ATTEMPTS) -> dict:
-    candidates = host_candidates(url) or [url]
+    """Extract info, retrying across hosts and page types.
+
+    Stage 1: the classic ``view_video.php`` page on every host (original,
+    www, mirror TLDs). Stage 2 (only if stage 1 failed with an anti-bot
+    bounce): the ``/embed/`` page on the same hosts, which is served by a
+    different route and often bypasses the redirect-to-homepage bounce.
+    """
     cookies_file = _warm_cookies_file(url)
     last_error: Exception | None = None
+    tried = 0
+
+    def run_once(target: str):
+        nonlocal last_error, tried
+        tried += 1
+        try:
+            return _extract_sync(target, cookies_file)
+        except Exception as exc:  # DownloadError/ExtractorError/network…
+            last_error = exc
+            logger.warning(
+                "PornHub extract attempt %d failed (%s): %s", tried, target, exc,
+            )
+            if tried < attempts:
+                time.sleep(0.7 + tried * 0.5)
+            return None
+
     try:
-        for attempt in range(attempts):
-            target = candidates[attempt % len(candidates)]
-            try:
-                return _extract_sync(target, cookies_file)
-            except Exception as exc:  # DownloadError/ExtractorError/network…
-                last_error = exc
-                logger.warning(
-                    "PornHub extract attempt %d/%d failed (%s): %s",
-                    attempt + 1, attempts, target, exc,
-                )
-                if attempt + 1 < attempts:
-                    time.sleep(0.8 + attempt * 0.8)
+        # stage 1: the classic video pages on every host/mirror
+        for target in (host_candidates(url) or [url]):
+            if tried >= attempts:
+                break
+            result = run_once(target)
+            if result is not None:
+                return result
+
+        # stage 2: only when stage 1 ended with an anti-bot bounce
+        if last_error is not None and is_bounce_error(last_error):
+            logger.info("PornHub view_video.php bounced; retrying via /embed/ pages")
+            for target in embed_candidates(url):
+                if tried >= attempts:
+                    break
+                result = run_once(target)
+                if result is not None:
+                    return result
     finally:
         if cookies_file:
             try:
@@ -199,7 +264,7 @@ def _extract_with_retry(url: str, attempts: int = EXTRACT_ATTEMPTS) -> dict:
             except OSError:
                 pass
     assert last_error is not None
-    if "Redirection detected" in str(last_error):
+    if is_bounce_error(last_error):
         logger.warning("PornHub redirect probe: %s", _probe_redirect_target(url))
     raise last_error
 
