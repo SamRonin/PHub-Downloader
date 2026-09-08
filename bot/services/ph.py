@@ -1,7 +1,37 @@
+"""PornHub access layer.
+
+Everything that talks to PornHub goes through this module so the whole
+"which host / which page / which cookies / which proxy" strategy lives in one
+place.
+
+Why this file looks the way it does
+-----------------------------------
+PornHub serves different answers depending on the *client IP* (Railway
+egress IPs are shared/rotating; some are flagged and answered with an
+anti-bot bounce: the video page is redirected to the homepage), on the *host*
+(www vs apex, and the mirror TLDs .com/.net/.org), and on the *page type*
+(the full ``view_video.php`` page can be bounced while the ``/embed/`` player
+page for the same video is not).
+
+So extraction tries, in order:
+  * the video page on www.<apex> and <apex>,
+  * then the same on the mirror TLDs,
+  * then the /embed/ player page on each of those hosts,
+with a shared, warm cookie jar (persisted briefly so repeated requests look
+like one consistent visitor instead of a fresh cookie-less bot each time),
+optionally through a proxy (PH_PROXY / PROXY_URL).
+
+The working sample ``main.py`` downloads fine from its own host/IP with a
+plain yt-dlp call; when this bot is deployed on an IP that PornHub flags, no
+amount of yt-dlp options helps, and the fix is the *egress path* (see
+``PornHubBlockedError`` and the startup health-check in bot/main.py).
+"""
+
 import asyncio
 import logging
 import os
 import tempfile
+import threading
 import time
 from urllib.parse import parse_qs, urlsplit, urlunsplit
 
@@ -13,6 +43,9 @@ logger = logging.getLogger(__name__)
 
 QUALITIES = [360, 480, 720, 1080]
 
+#: PornHub serves the same videos on all three TLDs.
+_PH_HOSTS = ("pornhub.com", "pornhub.net", "pornhub.org")
+
 _EXTRACT_OPTS = {
     "quiet": True,
     "no_warnings": True,
@@ -22,122 +55,186 @@ _EXTRACT_OPTS = {
     "retries": 3,
 }
 
-# How many times to re-run an extraction when PornHub serves a redirect /
-# bot-check / transient error page. With 3 mirror TLDs + www variants plus the
-# /embed/ fallback, up to ~12 URLs can be tried before giving up.
-EXTRACT_ATTEMPTS = 12
+#: Upper bound on page fetches per request before giving up. Enough to cover
+#: the host/page matrix without hammering a flagged IP.
+MAX_ATTEMPTS = 10
 
-_PH_APEX_HOSTS = ("pornhub.com", "pornhub.net", "pornhub.org")
+#: Cookie jars are reused for this long so repeated requests look like one
+#: consistent visitor (and we do not re-fetch the homepage for every link).
+COOKIE_TTL_SECONDS = 600
 
 _PH_PAGE_HEADERS = {
     "Accept-Language": "en-US,en;q=0.9",
     "Referer": "https://www.pornhub.com/",
 }
 
+_BOUNCE_MARKERS = (
+    "Redirection detected",
+    "HTTP Error 403",
+    "HTTP Error 429",
+)
 
-def get_proxy() -> str | None:
-    """Optional proxy for all PornHub traffic (env PH_PROXY / PROXY_URL).
 
-    Railway egress IPs are shared/rotating and some ranges are flagged by
-    PornHub, which answers those IPs with a redirect. Pointing PH_PROXY at a
-    clean IP (another host, a residential proxy, …) bypasses the block:
-        PH_PROXY=http://user:pass@host:port
-        PH_PROXY=socks5://host:port
+class PornHubLinkError(ValueError):
+    """The URL is not a PornHub video URL we can act on."""
+
+
+class PornHubBlockedError(RuntimeError):
+    """Every access route was bounced by PornHub (anti-bot on this egress IP).
+
+    The video is almost certainly fine — the *server* is being blocked.
+    Remedies (in order): redeploy to get a fresh Railway egress IP, change the
+    Railway region, or set PH_PROXY to a proxy on a clean IP.
     """
-    return os.getenv("PH_PROXY") or os.getenv("PROXY_URL") or None
+
+
+# --------------------------------------------------------------------------
+# URL handling
+# --------------------------------------------------------------------------
+
+def _apex_of(host: str) -> str:
+    host = (host or "").lower().strip(".")
+    return host[4:] if host.startswith("www.") else host
+
+
+def canonical_view_url(url: str) -> str:
+    """Normalise any PornHub video URL to the canonical form
+    ``https://www.<apex>/view_video.php?viewkey=<id>`` and return it.
+
+    Raises PornHubLinkError if the URL is not a PornHub video link.
+    """
+    parts = urlsplit(url)
+    apex = _apex_of(parts.hostname or "")
+    if apex not in _PH_HOSTS:
+        raise PornHubLinkError(f"Not a PornHub link: {url}")
+
+    viewkey = parse_qs(parts.query).get("viewkey", [""])[0]
+    if not viewkey:
+        # maybe an /embed/<id> or /video/show?viewkey= form
+        segs = [s for s in parts.path.split("/") if s]
+        for s in reversed(segs):
+            if s and s.isalnum():
+                viewkey = s
+                break
+    if not viewkey or not viewkey.isalnum():
+        raise PornHubLinkError(f"No viewkey in link: {url}")
+
+    return f"https://www.{apex}/view_video.php?viewkey={viewkey}"
 
 
 def host_candidates(url: str) -> list[str]:
-    """Return up to [original, www-toggle, other pornhub TLDs + www-toggle]
-    (deduplicated).
-
-    PornHub sometimes answers one host/domain with a redirect/bot page while
-    another works, so retrying on alternate hosts helps a lot from flagged
-    datacenter IPs. The video with the same viewkey exists on all three TLDs.
-    """
-    parts = urlsplit(url)
-    host = (parts.hostname or "").lower()
-    apex = host[4:] if host.startswith("www.") else host
-    if apex not in _PH_APEX_HOSTS:
-        return [url]
-
-    out: list[str] = []
-
-    def push(h: str) -> None:
-        candidate = urlunsplit((parts.scheme, h, parts.path, parts.query, parts.fragment))
-        if candidate not in out:
-            out.append(candidate)
-
-    def push_apex(a: str) -> None:
-        push(a)
-        push(f"www.{a}")
-
-    push(host)  # the exact host the user gave, first
-    push_apex(apex)
-    for other in _PH_APEX_HOSTS:  # mirror TLDs (net / org when given com, …)
+    """The ordered list of hosts to try for ``url``: its own TLD (www then
+    apex) first, then the mirror TLDs (www then apex)."""
+    apex = _apex_of(urlsplit(url).hostname or "")
+    if apex not in _PH_HOSTS:
+        return [urlsplit(url).netloc]
+    order = [f"www.{apex}", apex]
+    for other in _PH_HOSTS:
         if other != apex:
-            push_apex(other)
-    return out
+            order += [f"www.{other}", other]
+    return order
 
 
-# ---------------------------------------------------------------------------
-# Cookie warm-up
-#
-# PornHub's anti-bot front door (mostly noticeable from datacenter IPs)
-# answers the FIRST request of a cookie-less session with a redirect. After
-# the visitor's homepage has set its cookies (ua / ss / sessid / bs / …),
-# the video page loads normally. So before extracting we fetch the homepage
-# once and hand those cookies to yt-dlp.
-# ---------------------------------------------------------------------------
+def attempt_targets(url: str) -> list[str]:
+    """Ordered list of page URLs to try for a canonical video URL.
 
-def _warm_cookies_file(url: str) -> str | None:
-    """Fetch the PornHub homepage with a fresh browser-impersonating session,
-    export the cookies to a Netscape cookies file and return its path.
-    Returns None if warming is unavailable/failed (caller then retries blind).
+    For every host we try the full page first, then the /embed/ page (a
+    different route that is frequently not part of the anti-bot bounce).
     """
+    canon = canonical_view_url(url)
+    parts = urlsplit(canon)
+    viewkey = parse_qs(parts.query)["viewkey"][0]
+    targets: list[str] = []
+    for host in host_candidates(canon):
+        for kind, path in (
+            ("view", f"/view_video.php?viewkey={viewkey}"),
+            ("embed", f"/embed/{viewkey}"),
+        ):
+            targets.append(urlunsplit(("https", host, path, "", "")))
+    return targets
+
+
+# --------------------------------------------------------------------------
+# Cookie warm-up (persistent, shared, TTL-cached)
+# --------------------------------------------------------------------------
+
+_cookie_lock = threading.Lock()
+_cookie_cache: dict[str, tuple[float, str]] = {}  # apex -> (timestamp, path)
+
+
+def get_proxy() -> str | None:
+    """Optional proxy for all PornHub traffic (env PH_PROXY / PROXY_URL)."""
+    return os.getenv("PH_PROXY") or os.getenv("PROXY_URL") or None
+
+
+def _curl_session():
+    import curl_cffi.requests as cr
+
+    kwargs = {"impersonate": "chrome"}
+    proxy = get_proxy()
+    if proxy:
+        kwargs["proxies"] = {"http": proxy, "https": proxy}
+    return cr.Session(**kwargs)
+
+
+def _warm_cookies_for_apex(apex: str) -> str | None:
+    """Fetch the homepage of one apex host once and cache its cookies in a
+    Netscape cookies file (TTL COOKIE_TTL_SECONDS). Returns the file path or
+    None when warming is unavailable/failed (caller then retries blind)."""
+    now = time.time()
+    with _cookie_lock:
+        cached = _cookie_cache.get(apex)
+        if cached and now - cached[0] < COOKIE_TTL_SECONDS and os.path.exists(cached[1]):
+            return cached[1]
+
     try:
-        import curl_cffi.requests as cr
-    except Exception:
-        return None
-    host = urlsplit(host_candidates(url)[0]).netloc
-    try:
-        proxy = get_proxy()
-        kwargs = {"impersonate": "chrome"}
-        if proxy:
-            kwargs["proxies"] = {"http": proxy, "https": proxy}
-        with cr.Session(**kwargs) as session:
-            resp = session.get(f"https://{host}/", headers=_PH_PAGE_HEADERS, timeout=25)
+        with _curl_session() as session:
+            resp = session.get(
+                f"https://www.{apex}/", headers=_PH_PAGE_HEADERS, timeout=25
+            )
             if resp.status_code != 200:
                 return None
             cookies = list(session.cookies.jar)
-        if not cookies:
-            return None
-        fd, path = tempfile.mkstemp(prefix="ph_cookies_", suffix=".txt")
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            fh.write("# Netscape HTTP Cookie File\n")
-            for c in cookies:
-                # format: domain  include_subdomains  path  secure  expires  name  value
-                # A cookie that arrived with a leading-dot domain is a domain
-                # cookie: keep the dot and include_subdomains=TRUE. A host-only
-                # cookie has no dot -> include_subdomains=FALSE. (python's
-                # cookiejar loader is strict about this.)
-                expires = int(c.expires) if c.expires else 0
-                secure = "TRUE" if c.secure else "FALSE"
-                domain = c.domain or host
-                if domain.startswith("."):
-                    include_sub = "TRUE"
-                else:
-                    include_sub = "FALSE"
-                fh.write(
-                    f"{domain}\t{include_sub}\t{c.path or '/'}\t{secure}\t{expires}\t"
-                    f"{c.name}\t{c.value}\n"
-                )
-        logger.info("PornHub warm-up OK: %d cookies -> %s", len(cookies), os.path.basename(path))
-        return path
     except Exception:
-        logger.debug("PornHub warm-up failed", exc_info=True)
+        logger.debug("PornHub warm-up failed for %s", apex, exc_info=True)
         return None
 
+    if not cookies:
+        return None
+
+    fd, path = tempfile.mkstemp(prefix=f"ph_cookies_{apex.split('.')[0]}_", suffix=".txt")
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write("# Netscape HTTP Cookie File\n")
+        for c in cookies:
+            expires = int(c.expires) if c.expires else 0
+            secure = "TRUE" if c.secure else "FALSE"
+            domain = c.domain or f".{apex}"
+            include_sub = "TRUE" if domain.startswith(".") else "FALSE"
+            fh.write(
+                f"{domain}\t{include_sub}\t{c.path or '/'}\t{secure}\t{expires}\t"
+                f"{c.name}\t{c.value}\n"
+            )
+
+    with _cookie_lock:
+        old = _cookie_cache.get(apex)
+        _cookie_cache[apex] = (time.time(), path)
+    if old:
+        try:
+            os.unlink(old[1])
+        except OSError:
+            pass
+    logger.info("PornHub warm-up OK for %s (%d cookies)", apex, len(cookies))
+    return path
+
+
+def warm_cookies_file(url: str) -> str | None:
+    """Cookie file path for the apex of ``url`` (warming on first use)."""
+    return _warm_cookies_for_apex(_apex_of(urlsplit(url).hostname or ""))
+
+
+# --------------------------------------------------------------------------
+# Extraction
+# --------------------------------------------------------------------------
 
 def _extract_sync(url: str, cookies_file: str | None = None) -> dict:
     opts = dict(_EXTRACT_OPTS)
@@ -150,128 +247,68 @@ def _extract_sync(url: str, cookies_file: str | None = None) -> dict:
         return ydl.extract_info(url, download=False)
 
 
+def is_bounce_error(exc: Exception) -> bool:
+    """True when the failure looks like an anti-bot/access bounce rather than
+    a genuine "video is gone / invalid" answer."""
+    text = str(exc)
+    return any(m in text for m in _BOUNCE_MARKERS) or "Unable to download webpage" in text
+
+
 def _probe_redirect_target(url: str) -> str:
-    """After every attempt fails with a redirect, fetch the URL once more with
-    a browser session and describe where it actually went. This turns the
-    generic yt-dlp error into an actionable log line."""
+    """One extra browser-style request describing where PornHub actually sent
+    us — turns the generic yt-dlp error into an actionable log line."""
     try:
-        import curl_cffi.requests as cr
-    except Exception:
-        return "(curl_cffi unavailable for probe)"
-    viewkey = parse_qs(urlsplit(url).query).get("viewkey", [""])[0]
-    host = urlsplit(host_candidates(url)[0]).netloc
-    try:
-        proxy = get_proxy()
-        kwargs = {"impersonate": "chrome"}
-        if proxy:
-            kwargs["proxies"] = {"http": proxy, "https": proxy}
-        with cr.Session(**kwargs) as session:
-            r = session.get(
-                f"https://{host}/view_video.php?viewkey={viewkey}",
-                headers=_PH_PAGE_HEADERS, timeout=25,
-            )
+        with _curl_session() as session:
+            r = session.get(url, headers=_PH_PAGE_HEADERS, timeout=25)
         return f"final_url={r.url} status={r.status_code} len={len(r.content)}"
     except Exception as exc:
         return f"probe error: {type(exc).__name__}: {str(exc)[:200]}"
 
 
-def _embed_url(url: str) -> str | None:
-    """Convert a ``view_video.php?viewkey=X`` URL to the embed-page URL
-    (``/embed/X``) on the SAME host, or None if not applicable."""
-    parts = urlsplit(url)
-    viewkey = parse_qs(parts.query).get("viewkey", [""])[0]
-    if not viewkey or "view_video.php" not in parts.path:
-        return None
-    return urlunsplit((parts.scheme, parts.netloc, f"/embed/{viewkey}", "", ""))
+def _extract_with_retry(url: str, attempts: int = MAX_ATTEMPTS) -> dict:
+    canon = canonical_view_url(url)
+    targets = attempt_targets(canon)
+    apex = _apex_of(urlsplit(canon).hostname or "")
+    cookies_file = _warm_cookies_for_apex(apex)
 
-
-def embed_candidates(url: str) -> list[str]:
-    """Embed-page URLs on the same host candidates (see host_candidates).
-
-    PornHub's anti-bot bounce redirects the full ``view_video.php`` page to
-    the homepage for flagged IPs, but the embed/player page is served by a
-    different route and often still works. Same viewkey, same video info.
-    """
-    base = host_candidates(url) or [url]
-    out: list[str] = []
-    for c in base:
-        e = _embed_url(c)
-        if e and e not in out:
-            out.append(e)
-    return out
-
-
-def is_bounce_error(exc: Exception) -> bool:
-    """True when the error looks like an anti-bot / access bounce rather than
-    a genuine "video is gone" answer."""
-    text = str(exc)
-    return (
-        "Redirection detected" in text
-        or "HTTP Error 403" in text
-        or "HTTP Error 429" in text
-        or "Unable to download webpage" in text
-    )
-
-
-def _extract_with_retry(url: str, attempts: int = EXTRACT_ATTEMPTS) -> dict:
-    """Extract info, retrying across hosts and page types.
-
-    Stage 1: the classic ``view_video.php`` page on every host (original,
-    www, mirror TLDs). Stage 2 (only if stage 1 failed with an anti-bot
-    bounce): the ``/embed/`` page on the same hosts, which is served by a
-    different route and often bypasses the redirect-to-homepage bounce.
-    """
-    cookies_file = _warm_cookies_file(url)
     last_error: Exception | None = None
-    tried = 0
-
-    def run_once(target: str):
-        nonlocal last_error, tried
-        tried += 1
+    for index, target in enumerate(targets[:attempts]):
+        # Warm the mirror apex lazily the first time we touch it.
+        target_apex = _apex_of(urlsplit(target).hostname or "")
+        if target_apex != apex:
+            cookies_file = _warm_cookies_for_apex(target_apex) or cookies_file
         try:
             return _extract_sync(target, cookies_file)
         except Exception as exc:  # DownloadError/ExtractorError/network…
             last_error = exc
+            if not is_bounce_error(exc):
+                # Real answer (removed/private/locked/…): do not keep hopping
+                # hosts, surface it.
+                raise
             logger.warning(
-                "PornHub extract attempt %d failed (%s): %s", tried, target, exc,
+                "PornHub attempt %d/%d bounced (%s): %s",
+                index + 1, min(attempts, len(targets)), target, exc,
             )
-            if tried < attempts:
-                time.sleep(0.7 + tried * 0.5)
-            return None
+            if index + 1 < min(attempts, len(targets)):
+                time.sleep(1.0 + index * 0.4)
 
-    try:
-        # stage 1: the classic video pages on every host/mirror
-        for target in (host_candidates(url) or [url]):
-            if tried >= attempts:
-                break
-            result = run_once(target)
-            if result is not None:
-                return result
-
-        # stage 2: only when stage 1 ended with an anti-bot bounce
-        if last_error is not None and is_bounce_error(last_error):
-            logger.info("PornHub view_video.php bounced; retrying via /embed/ pages")
-            for target in embed_candidates(url):
-                if tried >= attempts:
-                    break
-                result = run_once(target)
-                if result is not None:
-                    return result
-    finally:
-        if cookies_file:
-            try:
-                os.unlink(cookies_file)
-            except OSError:
-                pass
     assert last_error is not None
-    if is_bounce_error(last_error):
-        logger.warning("PornHub redirect probe: %s", _probe_redirect_target(url))
-    raise last_error
+    logger.warning("PornHub redirect probe (%s): %s", canon, _probe_redirect_target(canon))
+    raise PornHubBlockedError(
+        "PornHub bounced every access route for this server IP "
+        "(video page redirected to homepage). The video is likely fine; "
+        "the server's egress IP is being blocked. Redeploy for a fresh IP, "
+        "change the Railway region, or set PH_PROXY to a clean proxy."
+    ) from last_error
 
 
-async def extract_info(url: str, attempts: int = EXTRACT_ATTEMPTS) -> dict:
+async def extract_info(url: str, attempts: int = MAX_ATTEMPTS) -> dict:
     return await asyncio.to_thread(_extract_with_retry, url, attempts)
 
+
+# --------------------------------------------------------------------------
+# Quality / summary helpers (unchanged behaviour)
+# --------------------------------------------------------------------------
 
 def pick_qualities(info: dict) -> dict:
     """Pick the best format per target height. Returns {height: format_dict}."""
@@ -289,15 +326,11 @@ def pick_qualities(info: dict) -> dict:
 
 
 def format_spec_for(fmt: dict) -> str:
-    """Return a yt-dlp selector that resolves to the best format at the SAME
-    height as ``fmt``.
+    """Selector resolving to the best format at the SAME height as ``fmt``.
 
-    Selecting by *height* instead of the exact format id is required: PornHub
-    varies which representations it serves between requests. Sometimes the
-    page contains direct mp4 formats (ids like ``720p``) and sometimes only
-    HLS variants (ids like ``hls-2512``, same heights). Locking onto a format
-    id taken from an earlier extraction then fails with
-    "Requested format is not available" on the next request.
+    Selecting by height (not format id) is required: PornHub varies between
+    direct mp4 ids (``720p``) and HLS ids (``hls-2512``) across requests, so
+    an id captured earlier may not exist on the next request.
     """
     h = fmt.get("height")
     if not h:
