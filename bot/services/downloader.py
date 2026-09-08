@@ -5,7 +5,12 @@ from pathlib import Path
 
 import yt_dlp
 
-from bot.services.ph import EXTRACT_ATTEMPTS, _warm_cookies_file, host_candidates
+from bot.services.ph import (
+    EXTRACT_ATTEMPTS,
+    _warm_cookies_file,
+    get_proxy,
+    host_candidates,
+)
 
 
 async def download_video(
@@ -55,6 +60,9 @@ async def download_video(
                 }
                 if cookies_file:
                     opts["cookiefile"] = cookies_file
+                proxy = get_proxy()
+                if proxy:
+                    opts["proxy"] = proxy
                 if rate_limit:
                     opts["ratelimit"] = rate_limit
                 try:

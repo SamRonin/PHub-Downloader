@@ -23,8 +23,9 @@ _EXTRACT_OPTS = {
 }
 
 # How many times to re-run an extraction when PornHub serves a redirect /
-# bot-check / transient error page. Known failures are usually momentary.
-EXTRACT_ATTEMPTS = 4
+# bot-check / transient error page. With the 3 mirror TLDs + www variants
+# there can be up to 6 distinct hosts, so try up to 6 times.
+EXTRACT_ATTEMPTS = 6
 
 _PH_APEX_HOSTS = ("pornhub.com", "pornhub.net", "pornhub.org")
 
@@ -34,24 +35,48 @@ _PH_PAGE_HEADERS = {
 }
 
 
-def host_candidates(url: str) -> list[str]:
-    """Return [original_url, same_url_with_www/apex_toggled] (deduplicated).
+def get_proxy() -> str | None:
+    """Optional proxy for all PornHub traffic (env PH_PROXY / PROXY_URL).
 
-    PornHub sometimes answers one host with a redirect/bot page while the
-    other works, so re-trying on the alternate host helps a lot from
-    datacenter IPs.
+    Railway egress IPs are shared/rotating and some ranges are flagged by
+    PornHub, which answers those IPs with a redirect. Pointing PH_PROXY at a
+    clean IP (another host, a residential proxy, …) bypasses the block:
+        PH_PROXY=http://user:pass@host:port
+        PH_PROXY=socks5://host:port
+    """
+    return os.getenv("PH_PROXY") or os.getenv("PROXY_URL") or None
+
+
+def host_candidates(url: str) -> list[str]:
+    """Return up to [original, www-toggle, other pornhub TLDs + www-toggle]
+    (deduplicated).
+
+    PornHub sometimes answers one host/domain with a redirect/bot page while
+    another works, so retrying on alternate hosts helps a lot from flagged
+    datacenter IPs. The video with the same viewkey exists on all three TLDs.
     """
     parts = urlsplit(url)
     host = (parts.hostname or "").lower()
     apex = host[4:] if host.startswith("www.") else host
     if apex not in _PH_APEX_HOSTS:
         return [url]
-    alt = f"www.{apex}" if host == apex else apex
-    out = []
-    for h in (host, alt):
+
+    out: list[str] = []
+
+    def push(h: str) -> None:
         candidate = urlunsplit((parts.scheme, h, parts.path, parts.query, parts.fragment))
         if candidate not in out:
             out.append(candidate)
+
+    def push_apex(a: str) -> None:
+        push(a)
+        push(f"www.{a}")
+
+    push(host)  # the exact host the user gave, first
+    push_apex(apex)
+    for other in _PH_APEX_HOSTS:  # mirror TLDs (net / org when given com, …)
+        if other != apex:
+            push_apex(other)
     return out
 
 
@@ -76,7 +101,11 @@ def _warm_cookies_file(url: str) -> str | None:
         return None
     host = urlsplit(host_candidates(url)[0]).netloc
     try:
-        with cr.Session(impersonate="chrome") as session:
+        proxy = get_proxy()
+        kwargs = {"impersonate": "chrome"}
+        if proxy:
+            kwargs["proxies"] = {"http": proxy, "https": proxy}
+        with cr.Session(**kwargs) as session:
             resp = session.get(f"https://{host}/", headers=_PH_PAGE_HEADERS, timeout=25)
             if resp.status_code != 200:
                 return None
@@ -114,6 +143,9 @@ def _extract_sync(url: str, cookies_file: str | None = None) -> dict:
     opts = dict(_EXTRACT_OPTS)
     if cookies_file:
         opts["cookiefile"] = cookies_file
+    proxy = get_proxy()
+    if proxy:
+        opts["proxy"] = proxy
     with yt_dlp.YoutubeDL(opts) as ydl:
         return ydl.extract_info(url, download=False)
 
@@ -129,7 +161,11 @@ def _probe_redirect_target(url: str) -> str:
     viewkey = parse_qs(urlsplit(url).query).get("viewkey", [""])[0]
     host = urlsplit(host_candidates(url)[0]).netloc
     try:
-        with cr.Session(impersonate="chrome") as session:
+        proxy = get_proxy()
+        kwargs = {"impersonate": "chrome"}
+        if proxy:
+            kwargs["proxies"] = {"http": proxy, "https": proxy}
+        with cr.Session(**kwargs) as session:
             r = session.get(
                 f"https://{host}/view_video.php?viewkey={viewkey}",
                 headers=_PH_PAGE_HEADERS, timeout=25,
@@ -155,7 +191,7 @@ def _extract_with_retry(url: str, attempts: int = EXTRACT_ATTEMPTS) -> dict:
                     attempt + 1, attempts, target, exc,
                 )
                 if attempt + 1 < attempts:
-                    time.sleep(1.5 + attempt * 1.5)
+                    time.sleep(0.8 + attempt * 0.8)
     finally:
         if cookies_file:
             try:
