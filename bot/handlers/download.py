@@ -44,12 +44,14 @@ def _free_disk_bytes() -> int | None:
 
 
 def _estimated_size(info: dict, height: int) -> int | None:
-    """Approximate size (bytes) from duration × bitrate, or None when unknown."""
-    dur = info.get("duration") or 0
-    tbr = (info.get("qualities") or {}).get(height, {}).get("tbr") or 0
-    if not dur or not tbr:
-        return None
-    return int(dur * tbr * 1000 / 8)
+    """Estimated size (bytes) for this quality, or None when unknown.
+
+    ``summarize()`` already filled qualities[height]["size"] with the
+    duration × bitrate estimate — reuse it so the streaming decision, the
+    quota gate and the caption all agree.
+    """
+    q = (info.get("qualities") or {}).get(height) or {}
+    return q.get("size") or None
 
 
 async def _progress_editor(
