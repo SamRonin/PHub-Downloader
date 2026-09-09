@@ -336,6 +336,42 @@ async def extract_info(url: str, attempts: int = MAX_ATTEMPTS) -> dict:
 # Quality / summary helpers (unchanged behaviour)
 # --------------------------------------------------------------------------
 
+#: Rough per-quality average bitrate (kbps) used ONLY when PornHub gives no
+#: tbr for a height (rare — HLS variants normally carry tbr). Calibrated so a
+#: ~10:29 1080p video lands near 183 MB (the user's observed real-world size).
+_QUALITY_REF_KBPS = {360: 800, 480: 1300, 720: 2600, 1080: 2450}
+
+
+def estimate_bytes(duration: int | None, tbr_kbps: int | None, height: int) -> int | None:
+    """Approximate size in bytes from duration × bitrate.
+
+    PornHub never reports a filesize for HLS streams, so this is the only way
+    to show a size in the menu. ``tbr`` (per-video bitrate, when present) makes
+    it accurate to a few percent; otherwise a per-quality reference is used.
+    """
+    dur = duration or 0
+    if not dur:
+        return None
+    kbps = tbr_kbps or _QUALITY_REF_KBPS.get(height)
+    if not kbps:
+        return None
+    return int(dur * kbps * 1000 / 8)
+
+
+def _best_tbr_for_height(info: dict, height: int) -> int | None:
+    """Highest bitrate among ALL formats at ``height``.
+
+    The menu picks a progressive format (which has no tbr) while yt-dlp will
+    actually download the same-height HLS variant (which carries the tbr) —
+    so look across the whole height, not just the picked format.
+    """
+    best = 0
+    for f in info.get("formats") or []:
+        if f.get("height") == height:
+            best = max(best, f.get("tbr") or 0)
+    return best or None
+
+
 def pick_qualities(info: dict) -> dict:
     """Pick the best format per target height. Returns {height: format_dict}."""
     result = {}
@@ -369,18 +405,34 @@ def format_spec_for(fmt: dict) -> str:
 
 
 def summarize(info: dict) -> dict:
-    """Compact summary used in captions."""
+    """Compact summary used in captions.
+
+    PornHub never sends a filesize, so sizes are estimated from
+    duration × bitrate and marked with a ``~`` prefix; the real size is
+    recorded after the actual download.
+    """
     qualities = pick_qualities(info)
+    duration = info.get("duration")
     sizes = {}
     for h, f in qualities.items():
-        size = f.get("filesize") or f.get("filesize_approx")
+        actual = f.get("filesize") or f.get("filesize_approx")
+        approx = False
+        if actual:
+            size = actual
+        else:
+            size = estimate_bytes(duration, _best_tbr_for_height(info, h), h)
+            approx = size is not None
+        size_str = None if size is None else fmt_size(size)
+        if size is not None and approx:
+            size_str = "~" + size_str
         sizes[h] = {
-            "size": size,
-            "size_str": fmt_size(size),
+            "size": size,  # estimate when approx is True
+            "size_approx": approx,
+            "size_str": size_str,
             "format_id": f.get("format_id"),
             "format_spec": format_spec_for(f),
             "protocol": f.get("protocol"),
-            "tbr": f.get("tbr"),  # kbps — used to estimate big-file size
+            "tbr": f.get("tbr") or _best_tbr_for_height(info, h),  # kbps
         }
     return {
         "id": info.get("id"),
