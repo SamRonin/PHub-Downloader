@@ -13,11 +13,13 @@ STRINGS = {
         "help": (
             "ℹ️ <b>راهنما</b>\n\n"
             "• لینک ویدیو را بفرست تا مشخصات و کیفیت‌ها نمایش داده شود.\n"
+            "• یا فقط کلمات را بفرست تا در Pornhub جست‌وجو شود.\n"
             "• روی دکمه کیفیت بزن تا دانلود شروع شود.\n"
             "• فایل‌های تا ۵۰ مگ مستقیم در تلگرام ارسال می‌شوند؛ فایل‌های بزرگ‌تر با لینک Pixeldrain.\n"
             "• لینک‌های Pixeldrain به‌صورت خودکار بعد از ۳۰ دقیقه حذف می‌شوند.\n\n"
             "دستورات:\n"
             "/start - شروع و لینک رفرال\n"
+            "/search - جست‌وجو در Pornhub\n"
             "/lang - تغییر زبان\n"
             "/status - وضعیت سهمیه امروز"
         ),
@@ -32,6 +34,14 @@ STRINGS = {
         "send_link": "لطفاً لینک ویدیو Pornhub را بفرست.",
         "invalid_link": "❌ این لینک معتبر نیست. لطفاً فقط لینک ویدیو Pornhub را بفرست.",
         "fetching": "🔎 در حال دریافت اطلاعات ویدیو...",
+        "searching": "🔎 در حال جست‌وجو برای «{q}»...",
+        "search_header": "🔎 <b>نتایج جست‌وجو برای «{q}»</b>\nصفحه {page} از {pages}",
+        "search_hint": "👆 یکی را انتخاب کن تا کیفیت‌های دانلود نشان داده شود.",
+        "search_prev": "⬅️ صفحه قبل",
+        "search_next": "صفحه بعد ➡️",
+        "search_no_results": "❌ نتیجه‌ای برای «{q}» پیدا نشد. کلمه‌ی دیگری را امتحان کن.",
+        "search_usage": "🔎 برای جست‌وجو، کلمات را بفرست (مثلا: step sister) یا بنویس /search step sister",
+        "search_expired": "⌛ نتایج منقضی شده‌اند. لطفاً دوباره جست‌وجو کن.",
         "expired": "⌛ این پیام منقضی شده است. لطفاً لینک را دوباره بفرست.",
         "banned": "⛔ دسترسی شما مسدود شده است.",
         "already_processing": "⏳ یک دانلود دیگر در حال انجام است. لطفاً صبر کن.",
@@ -126,11 +136,13 @@ STRINGS = {
         "help": (
             "ℹ️ <b>Help</b>\n\n"
             "• Send a video link to see qualities and sizes.\n"
+            "• Or just send keywords to search Pornhub.\n"
             "• Tap a quality button to start the download.\n"
             "• Files up to 50 MB are sent directly in Telegram; larger files get a Pixeldrain link.\n"
             "• Pixeldrain links are auto-deleted after 30 minutes.\n\n"
             "Commands:\n"
             "/start - start & referral link\n"
+            "/search - search Pornhub\n"
             "/lang - switch language\n"
             "/status - today's quota status"
         ),
@@ -145,6 +157,14 @@ STRINGS = {
         "send_link": "Please send a Pornhub video link.",
         "invalid_link": "❌ Invalid link. Please send a Pornhub video link only.",
         "fetching": "🔎 Fetching video info...",
+        "searching": "🔎 Searching for “{q}”...",
+        "search_header": "🔎 <b>Results for “{q}”</b>\nPage {page} of {pages}",
+        "search_hint": "👆 Pick one to see the download qualities.",
+        "search_prev": "⬅️ Prev",
+        "search_next": "Next ➡️",
+        "search_no_results": "❌ No results for “{q}”. Try other keywords.",
+        "search_usage": "🔎 Send keywords to search (e.g. step sister) or use /search step sister",
+        "search_expired": "⌛ These results expired. Please search again.",
         "expired": "⌛ This message expired. Please send the link again.",
         "banned": "⛔ You are banned.",
         "already_processing": "⏳ Another download is already in progress. Please wait.",
