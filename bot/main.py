@@ -9,7 +9,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 
 from bot.config import settings
 from bot.db import db
-from bot.handlers import start, info, download, admin
+from bot.handlers import start, info, download, admin, search
 from bot.utils.cleanup import pixeldrain_expiry_loop, temp_cleanup_loop
 
 try:
@@ -145,6 +145,9 @@ async def main():
     dp.include_router(start.router)
     dp.include_router(admin.router)
     dp.include_router(download.router)
+    # search MUST come before info: aiogram stops propagating a message once a
+    # handler matched, and info has a catch-all text handler.
+    dp.include_router(search.router)
     dp.include_router(info.router)
 
     asyncio.create_task(pixeldrain_expiry_loop())
