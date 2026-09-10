@@ -28,8 +28,10 @@ amount of yt-dlp options helps, and the fix is the *egress path* (see
 """
 
 import asyncio
+import html as _html
 import logging
 import os
+import re
 import tempfile
 import threading
 import time
@@ -330,6 +332,133 @@ def _extract_with_retry(url: str, attempts: int = MAX_ATTEMPTS) -> dict:
 
 async def extract_info(url: str, attempts: int = MAX_ATTEMPTS) -> dict:
     return await asyncio.to_thread(_extract_with_retry, url, attempts)
+
+
+# --------------------------------------------------------------------------
+# Search
+# --------------------------------------------------------------------------
+#
+# PornHub has no public JSON search API, so we read the same results page the
+# website uses (``/video/search?search=...&page=N``) with our normal
+# browser-impersonated session and parse the result cards out of the HTML.
+# This reuses the whole host-rotation / warm-cookie / proxy machinery above,
+# so search survives the same anti-bot bounces as extraction does.
+
+#: Results live in <li class="pcVideoListItem …"> cards.
+_SEARCH_ITEM_RE = re.compile(
+    r'<li[^>]*class="[^"]*pcVideoListItem[^"]*"[\s\S]*?</li>', re.IGNORECASE
+)
+_SEARCH_LINK_RE = re.compile(
+    r'<a\s+href="/view_video\.php\?viewkey=([A-Za-z0-9]+)"\s+title="([^"]*)"',
+    re.IGNORECASE,
+)
+_SEARCH_VIEWKEY_RE = re.compile(r'data-video-vkey="([A-Za-z0-9]+)"')
+#: Two card variants exist on the listing page:
+#:   <var class="duration">12:57</var>
+#:   <var class="bgShadeEffect duration tooltipTrig" …>12:57</var>
+_SEARCH_DURATION_RE = re.compile(r'<var class="[^"]*duration[^"]*"[^>]*>([^<]*)</var>')
+#:   <span class="views"><var>266K</var> views</span>
+#:   <span class="views"><i class="ph-icon-view-on …"></i><var>47.5M</var>
+_SEARCH_VIEWS_RE = re.compile(
+    r'<span class="views">(?:\s*<i[^>]*></i>)?\s*<var>([^<]*)</var>', re.DOTALL
+)
+_SEARCH_THUMB_RE = re.compile(r'data-image="([^"]+)"')
+
+#: Cap on how many results we keep from a single page (the page ships ~38).
+SEARCH_PAGE_SIZE = 24
+
+
+def search_targets(query: str, page: int = 1) -> list[str]:
+    """Ordered list of search URLs to try (same host rotation as extraction)."""
+    from urllib.parse import urlencode
+
+    qs = urlencode({"search": query, "page": max(int(page), 1)})
+    path = f"/video/search?{qs}"
+    return [f"https://{host}{path}" for host in host_candidates("https://www.pornhub.com/x")]
+
+
+def parse_search_html(html: str) -> list[dict]:
+    """Extract result cards from a PornHub search/listing page."""
+    results: list[dict] = []
+    seen: set[str] = set()
+    for block in _SEARCH_ITEM_RE.findall(html or ""):
+        link = _SEARCH_LINK_RE.search(block)
+        viewkey_m = _SEARCH_VIEWKEY_RE.search(block)
+        viewkey = link.group(1) if link else (viewkey_m.group(1) if viewkey_m else None)
+        if not viewkey or viewkey in seen:
+            continue
+        title = _html.unescape(link.group(2)).strip() if link else ""
+        if not title:
+            continue
+        duration_m = _SEARCH_DURATION_RE.search(block)
+        views_m = _SEARCH_VIEWS_RE.search(block)
+        thumb_m = _SEARCH_THUMB_RE.search(block)
+        seen.add(viewkey)
+        results.append(
+            {
+                "viewkey": viewkey,
+                "title": title,
+                "url": canonical_view_url(
+                    f"https://www.pornhub.com/view_video.php?viewkey={viewkey}"
+                ),
+                "duration": duration_m.group(1).strip() if duration_m else None,
+                "views": views_m.group(1).strip() if views_m else None,
+                "thumbnail": _html.unescape(thumb_m.group(1)) if thumb_m else None,
+            }
+        )
+        if len(results) >= SEARCH_PAGE_SIZE:
+            break
+    return results
+
+
+def _search_sync(query: str, page: int = 1) -> list[dict]:
+    """Run one search page against every host route until one answers."""
+    query = (query or "").strip()
+    if not query:
+        return []
+
+    last_error: Exception | None = None
+    for index, target in enumerate(search_targets(query, page)):
+        apex = _apex_of(urlsplit(target).hostname or "")
+        cookies_file = _warm_cookies_for_apex(apex)
+        try:
+            with _curl_session() as session:
+                resp = session.get(target, headers=_PH_PAGE_HEADERS, timeout=30)
+            if resp.status_code != 200:
+                last_error = RuntimeError(
+                    f"search HTTP {resp.status_code} via {target.split('/')[2]}"
+                )
+                continue
+            results = parse_search_html(resp.text)
+            if results:
+                logger.info(
+                    "PornHub search %r page %d -> %d results via %s",
+                    query, page, len(results), target.split("/")[2],
+                )
+                return results
+            last_error = RuntimeError("no result cards in search page")
+        except Exception as exc:  # network / impersonation / proxy errors
+            last_error = exc
+            logger.warning(
+                "search attempt %d via %s failed: %s",
+                index + 1, target.split("/")[2], str(exc)[:160],
+            )
+        finally:
+            if cookies_file:
+                # Cookies are cached inside the module; nothing to clean here.
+                pass
+
+    if last_error is not None:
+        logger.warning("search failed on every host: %s", last_error)
+    raise PornHubBlockedError(
+        "PornHub search was blocked or returned nothing on every host. "
+        "The server's egress IP may be flagged; set PH_PROXY or redeploy."
+    ) from last_error
+
+
+async def search_videos(query: str, page: int = 1) -> list[dict]:
+    """Search PornHub, returning result cards (title, viewkey, duration…)."""
+    return await asyncio.to_thread(_search_sync, query, page)
 
 
 # --------------------------------------------------------------------------
