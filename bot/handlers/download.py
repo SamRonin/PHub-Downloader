@@ -16,6 +16,7 @@ from bot.services import pixeldrain
 from bot.services.downloader import download_video
 from bot.services.hls_stream import try_stream_to_pixeldrain
 from bot.services.ph import PornHubBlockedError
+from bot.services.transcode import transcode_to_height
 from bot.services.quota import check_quota_for_size, get_free_speed_limit, fmt_quota
 from bot.utils.cleanup import delete_path
 from bot.utils.helpers import fmt_size
@@ -52,6 +53,38 @@ def _estimated_size(info: dict, height: int) -> int | None:
     """
     q = (info.get("qualities") or {}).get(height) or {}
     return q.get("size") or None
+
+
+async def _apply_synthetic_quality(
+    path: Path,
+    height: int,
+    source_height: int,
+    task_dir: str,
+    state: dict,
+    duration: int | None,
+) -> tuple[Path, int]:
+    """Downscale a downloaded file to a synthetic quality (e.g. 360p).
+
+    Returns (path, effective_height). On failure the original file is returned
+    together with its real height, so the caption never lies about what the
+    user received. The source file is removed once the smaller copy exists.
+    """
+    logger.info("Transcoding %sp -> %dp", source_height, height)
+    try:
+        converted = await transcode_to_height(
+            path, height, Path(task_dir), state, duration
+        )
+        delete_path(str(path))  # drop the larger source right away
+        logger.info(
+            "Transcode OK -> %s (%s)", converted.name, fmt_size(converted.stat().st_size)
+        )
+        return converted, height
+    except Exception:
+        logger.exception(
+            "Transcode to %dp failed; delivering the %sp file instead",
+            height, source_height,
+        )
+        return path, source_height
 
 
 async def _progress_editor(
@@ -148,9 +181,19 @@ async def cb_download(cq: CallbackQuery, bot: Bot):
         # --- Streaming path: big files (Pixeldrain-bound anyway) that would
         # not fit safely in the 1 GB ephemeral disk are streamed straight from
         # PornHub to Pixeldrain, never staged on the local disk.
-        est = _estimated_size(info, height)
+        synthetic = bool(q.get("synthetic"))
+        source_height = int(q.get("source_height") or 0) or height
+        est = _estimated_size(info, source_height)
         free = _free_disk_bytes()
-        if est and est > settings.TELEGRAM_LIMIT and free and free < est + _DISK_HEADROOM:
+        # A synthetic quality must be transcoded locally, so it can never take
+        # the stream-to-Pixeldrain shortcut.
+        if (
+            not synthetic
+            and est
+            and est > settings.TELEGRAM_LIMIT
+            and free
+            and free < est + _DISK_HEADROOM
+        ):
             safe_name = _safe_name_re.sub("_", f"{info.get('id') or 'video'}_{height}p")[:80]
             safe_name += ".mp4"
             logger.info(
@@ -177,6 +220,16 @@ async def cb_download(cq: CallbackQuery, bot: Bot):
                 # the editor is watching — the chat % used to sit at 0%.
                 path, _ = await download_video(url, fmt_spec, task_dir, rate_limit, state)
             size = path.stat().st_size
+
+            if synthetic:
+                # Serve the requested (lower) quality by downscaling what we
+                # downloaded. The chat message keeps showing "downloading"
+                # meanwhile, so this is invisible to the user.
+                path, height = await _apply_synthetic_quality(
+                    path, height, source_height, task_dir, state, info.get("duration")
+                )
+                q = info["qualities"].get(height, q)
+                size = path.stat().st_size
 
             if size <= settings.TELEGRAM_LIMIT:
                 delivered = "telegram"

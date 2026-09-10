@@ -13,7 +13,12 @@ from aiogram.types import (
 )
 from PIL import Image
 
-from bot.services.ph import PornHubBlockedError, extract_info, summarize
+from bot.services.ph import (
+    PornHubBlockedError,
+    extract_info,
+    format_duration,
+    summarize,
+)
 from bot.utils.helpers import esc, is_phub_url, row_get
 from bot.utils.i18n import t
 from bot.handlers.cache import info_cache, detect_lang
@@ -93,6 +98,12 @@ def build_caption(info: dict, lang: str) -> str:
     views = info.get("view_count")
     if views:
         lines.append(t(lang, "views", n=f"{views:,}"))
+    uploader = (info.get("uploader") or "").strip()
+    if uploader:
+        lines.append(t(lang, "producer", name=esc(uploader)))
+    duration = info.get("duration_str") or format_duration(info.get("duration"))
+    if duration:
+        lines.append(t(lang, "duration_line", dur=duration))
     lines.append("")
     lines.append(t(lang, "sizes_header"))
     for h in sorted(info["qualities"].keys()):
