@@ -338,8 +338,9 @@ async def extract_info(url: str, attempts: int = MAX_ATTEMPTS) -> dict:
 
 #: Rough per-quality average bitrate (kbps) used ONLY when PornHub gives no
 #: tbr for a height (rare — HLS variants normally carry tbr). Calibrated so a
-#: ~10:29 1080p video lands near 183 MB (the user's observed real-world size).
-_QUALITY_REF_KBPS = {360: 800, 480: 1300, 720: 2600, 1080: 2450}
+#: ~10:29 1080p video lands near 183 MB (the user's observed real-world size),
+#: and 360 (always synthetic) near a measured 480p->360p encode (~530 kbps).
+_QUALITY_REF_KBPS = {360: 600, 480: 1400, 720: 2600, 1080: 2450}
 
 
 def estimate_bytes(duration: int | None, tbr_kbps: int | None, height: int) -> int | None:
@@ -356,6 +357,21 @@ def estimate_bytes(duration: int | None, tbr_kbps: int | None, height: int) -> i
     if not kbps:
         return None
     return int(dur * kbps * 1000 / 8)
+
+
+def format_duration(seconds) -> str | None:
+    """Seconds -> "M:SS" / "H:MM:SS" (None when unknown)."""
+    try:
+        total = int(seconds)
+    except (TypeError, ValueError):
+        return None
+    if total <= 0:
+        return None
+    h, rem = divmod(total, 3600)
+    m, s = divmod(rem, 60)
+    if h:
+        return f"{h}:{m:02d}:{s:02d}"
+    return f"{m}:{s:02d}"
 
 
 def _best_tbr_for_height(info: dict, height: int) -> int | None:
@@ -434,12 +450,42 @@ def summarize(info: dict) -> dict:
             "protocol": f.get("protocol"),
             "tbr": f.get("tbr") or _best_tbr_for_height(info, h),  # kbps
         }
+    # --- Synthetic 360p ---------------------------------------------------
+    # PornHub only publishes 480p/720p/1080p. Users still get a 360p button:
+    # we download the 480p stream and downscale it locally (see
+    # bot/services/transcode.py). The entry reuses the 480p format selector,
+    # so the downloader fetches 480p and the handler transcodes it.
+    if 360 not in sizes and sizes:
+        source = sizes.get(480) or sizes[min(sizes)]
+        size = estimate_bytes(duration, None, 360)  # reference bitrate
+        size_str = None if size is None else "~" + fmt_size(size)
+        sizes[360] = {
+            "size": size,
+            "size_approx": True,
+            "size_str": size_str,
+            "format_id": "360p",
+            "format_spec": source["format_spec"],  # resolves to the 480p stream
+            "protocol": source.get("protocol"),
+            "tbr": _QUALITY_REF_KBPS.get(360),
+            "synthetic": True,
+            "source_height": source.get("source_height") or 480,
+        }
+
+    uploader = (
+        info.get("uploader")
+        or info.get("channel")
+        or info.get("creator")
+        or info.get("uploader_id")
+    )
+
     return {
         "id": info.get("id"),
         "title": info.get("title"),
         "description": info.get("description"),
         "view_count": info.get("view_count"),
         "duration": info.get("duration"),
+        "duration_str": format_duration(info.get("duration")),
+        "uploader": uploader,
         "thumbnail": info.get("thumbnail"),
         "webpage_url": info.get("webpage_url") or info.get("original_url"),
         "qualities": sizes,
