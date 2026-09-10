@@ -17,6 +17,6 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY bot ./bot
-COPY main.py .env.example README.md ./
+COPY .env.example README.md ./
 
 CMD ["python", "-m", "bot.main"]
