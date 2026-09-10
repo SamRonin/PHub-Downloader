@@ -35,7 +35,7 @@ import re
 import tempfile
 import threading
 import time
-from urllib.parse import parse_qs, urlsplit, urlunsplit
+from urllib.parse import parse_qs, urlencode, urlsplit, urlunsplit
 
 import yt_dlp
 
@@ -459,6 +459,468 @@ def _search_sync(query: str, page: int = 1) -> list[dict]:
 async def search_videos(query: str, page: int = 1) -> list[dict]:
     """Search PornHub, returning result cards (title, viewkey, duration…)."""
     return await asyncio.to_thread(_search_sync, query, page)
+
+
+# --------------------------------------------------------------------------
+# Producers (channels / pornstars / models)
+# --------------------------------------------------------------------------
+#
+# Same scrape-the-HTML approach as video search. PornHub has no public JSON
+# API for people/channels, so we hit:
+#   /channels/search?channelSearch=Q
+#   /pornstars/search?search=Q
+# then the profile page + the most-viewed listing
+#   /channels/<slug>/videos?o=vi     (Most Viewed on a channel)
+#   /pornstar/<slug>/videos?o=mv
+#   /model/<slug>/videos?o=mv
+# and reuse parse_search_html on the listing *section* — the rest of the page
+# carries recommended videos in the nav dropdown that must not leak in.
+
+PRODUCER_TOP_N = 10
+_PRODUCER_MAX_SEARCH = 24
+_RESERVED_PRODUCER_SLUGS = frozenset({"search", "discover"})
+
+_PRODUCER_URL_RE = re.compile(
+    r"^https?://(?:[a-z0-9-]+\.)*(?:pornhub\.(?:com|net|org))/"
+    r"(?P<kind>channels|pornstar|model)/(?P<slug>[A-Za-z0-9_-]+)"
+    r"(?:/videos)?/?(?:[?#].*)?$",
+    re.IGNORECASE,
+)
+
+#: kind stored on our cards -> URL path segment
+_KIND_PATH = {
+    "channel": "channels",
+    "pornstar": "pornstar",
+    "model": "model",
+}
+
+
+class ProducerNotFoundError(ValueError):
+    """The producer slug does not resolve to a profile we can parse."""
+
+
+def parse_producer_url(text: str) -> tuple[str, str] | None:
+    """Return ``(kind, slug)`` for a channel/pornstar/model URL, else None.
+
+    ``kind`` is one of ``channel``, ``pornstar``, ``model``.
+    """
+    m = _PRODUCER_URL_RE.match((text or "").strip())
+    if not m:
+        return None
+    slug = m.group("slug")
+    if slug.lower() in _RESERVED_PRODUCER_SLUGS:
+        return None
+    kind = m.group("kind").lower()
+    if kind == "channels":
+        kind = "channel"
+    return kind, slug
+
+
+def format_count(value) -> str | None:
+    """Pretty-print a PornHub count (``8,463,389``, ``8463389``, ``1.7B``)."""
+    if value is None or value == "":
+        return None
+    if isinstance(value, int):
+        return f"{value:,}"
+    s = str(value).strip()
+    s = re.sub(r"\s*views?\s*$", "", s, flags=re.IGNORECASE).strip()
+    digits = s.replace(",", "").replace(" ", "")
+    if digits.isdigit():
+        return f"{int(digits):,}"
+    return s
+
+
+def compact_count(value) -> str | None:
+    """Short form for lists: ``8.5M``, ``10.6B``, ``1.7B``."""
+    formatted = format_count(value)
+    if not formatted:
+        return None
+    digits = formatted.replace(",", "")
+    if digits.isdigit():
+        n = int(digits)
+        if n >= 1_000_000_000:
+            v = n / 1_000_000_000
+            return f"{v:.1f}B".replace(".0B", "B")
+        if n >= 1_000_000:
+            v = n / 1_000_000
+            return f"{v:.1f}M".replace(".0M", "M")
+        if n >= 10_000:
+            v = n / 1_000
+            return f"{v:.1f}K".replace(".0K", "K")
+        return f"{n:,}"
+    return formatted
+
+
+def _get_ph_html(path: str) -> str:
+    """GET a PornHub path with host rotation. Returns HTML or raises."""
+    if not path.startswith("/"):
+        path = "/" + path
+    last_error: Exception | None = None
+    dummy = "https://www.pornhub.com/x"
+    for index, host in enumerate(host_candidates(dummy)):
+        url = f"https://{host}{path}"
+        apex = _apex_of(host)
+        _warm_cookies_for_apex(apex)
+        try:
+            with _curl_session() as session:
+                resp = session.get(url, headers=_PH_PAGE_HEADERS, timeout=30)
+            if resp.status_code != 200:
+                last_error = RuntimeError(f"HTTP {resp.status_code} via {host}")
+                continue
+            text = resp.text or ""
+            if len(text) < 4000:
+                last_error = RuntimeError(f"short body via {host}")
+                continue
+            final_path = urlsplit(str(resp.url)).path or "/"
+            wanted = path.split("?", 1)[0].rstrip("/")
+            if final_path.rstrip("/") in ("", "/") and wanted not in ("", "/"):
+                last_error = RuntimeError(f"bounced to homepage via {host}")
+                continue
+            return text
+        except Exception as exc:
+            last_error = exc
+            logger.warning(
+                "html fetch %d via %s failed: %s",
+                index + 1, host, str(exc)[:160],
+            )
+    raise PornHubBlockedError(
+        "PornHub blocked every host for this page. "
+        "The server's egress IP may be flagged; set PH_PROXY or redeploy."
+    ) from last_error
+
+
+def _section_html(html: str, section_id: str) -> str:
+    """Slice the HTML starting at ``id="section_id"`` (the real element, not JS)."""
+    m = re.search(rf'\bid=["\']{re.escape(section_id)}["\']', html or "")
+    if not m:
+        return ""
+    return html[m.start() : m.start() + 220_000]
+
+
+def parse_listing_videos(
+    html: str, section_ids: list[str], limit: int = PRODUCER_TOP_N
+) -> list[dict]:
+    """Video cards from a listing section (never the whole page — nav leak)."""
+    for sid in section_ids:
+        chunk = _section_html(html, sid)
+        if not chunk:
+            continue
+        items = parse_search_html(chunk)
+        if items:
+            return items[:limit]
+    return []
+
+
+def parse_channel_search(html: str) -> list[dict]:
+    """Cards from ``/channels/search?channelSearch=…``."""
+    m = re.search(r'id="searchChannelsSection"', html or "")
+    section = html[m.start() : m.start() + 250_000] if m else (html or "")
+    results: list[dict] = []
+    seen: set[str] = set()
+    # Split per card so stats from the previous channel cannot leak in.
+    for block in re.split(r'<div class="channelsWrapper', section, flags=re.I)[1:]:
+        match = re.search(
+            r'<a href="/(channels)/([A-Za-z0-9_-]+)" class="usernameLink">\s*([^<]+)\s*</a>',
+            block,
+            re.IGNORECASE,
+        )
+        if not match:
+            continue
+        slug = match.group(2)
+        name = _html.unescape(match.group(3)).strip()
+        if not name or slug.lower() in seen or slug.lower() in _RESERVED_PRODUCER_SLUGS:
+            continue
+        seen.add(slug.lower())
+        avatar = None
+        am = re.search(
+            r'<img[^>]+src="(https://[^"]+)"[^>]*alt="[^"]*avatar', block, re.IGNORECASE
+        )
+        if not am:
+            am = re.search(r'<img[^>]+src="(https://ei\.phncdn\.com[^"]+)"', block, re.I)
+        if am:
+            avatar = _html.unescape(am.group(1))
+        subs_m = re.search(r"<span>([\d,]+)</span>\s*Subscribers", block, re.I)
+        views_m = re.search(r"<span>([\d,]+)</span>\s*Videos\s*Views", block, re.I)
+        vids_m = re.search(r"<span>([\d,]+)</span>\s*Videos(?!\s*Views)", block, re.I)
+        results.append(
+            {
+                "kind": "channel",
+                "slug": slug,
+                "name": name,
+                "url": f"https://www.pornhub.com/channels/{slug}",
+                "avatar": avatar,
+                "subscribers": subs_m.group(1) if subs_m else None,
+                "video_count": vids_m.group(1) if vids_m else None,
+                "views": views_m.group(1) if views_m else None,
+                "rank": None,
+            }
+        )
+        if len(results) >= _PRODUCER_MAX_SEARCH:
+            break
+    return results
+
+
+def parse_pornstar_search(html: str) -> list[dict]:
+    """Cards from ``/pornstars/search?search=…`` (pornstars + models)."""
+    m = re.search(r'id="pornstarsSearchResult"', html or "")
+    section = html[m.start() : m.start() + 250_000] if m else (html or "")
+    results: list[dict] = []
+    seen: set[str] = set()
+    for block in re.split(r'<div class="wrap">', section)[1:]:
+        match = re.search(
+            r'<a href="/(pornstar|model)/([A-Za-z0-9_-]+)"[^>]*class="title"[^>]*>\s*([^<]+)\s*</a>',
+            block,
+            re.IGNORECASE,
+        )
+        if not match:
+            continue
+        kind = match.group(1).lower()
+        slug = match.group(2)
+        name = _html.unescape(match.group(3)).strip()
+        key = f"{kind}/{slug.lower()}"
+        if not name or key in seen:
+            continue
+        seen.add(key)
+        avatar = None
+        am = re.search(r'<img[^>]+src="(https://[^"]+)"', block, re.I)
+        if am:
+            avatar = _html.unescape(am.group(1))
+        vids_m = re.search(r'class="videosNumber">\s*([\d,]+)', block)
+        views_m = re.search(r'class="pstarViews">\s*([^<]+)', block)
+        rank_m = re.search(r'class="rank_number">\s*([\d,]+)', block)
+        views = None
+        if views_m:
+            views = re.sub(
+                r"\s*views?\s*$", "", views_m.group(1).strip(), flags=re.I
+            ).strip()
+        results.append(
+            {
+                "kind": kind,
+                "slug": slug,
+                "name": name,
+                "url": f"https://www.pornhub.com/{kind}/{slug}",
+                "avatar": avatar,
+                "subscribers": None,
+                "video_count": vids_m.group(1) if vids_m else None,
+                "views": views or None,
+                "rank": rank_m.group(1).strip() if rank_m else None,
+            }
+        )
+        if len(results) >= _PRODUCER_MAX_SEARCH:
+            break
+    return results
+
+
+def parse_channel_profile(html: str) -> dict:
+    """Name / avatar / stats from a ``/channels/<slug>`` page."""
+    name = None
+    m = re.search(r"<h1[^>]*>\s*([^<]+)", html or "", re.I)
+    if m:
+        name = _html.unescape(m.group(1)).strip()
+    avatar = None
+    m = re.search(r'id="getAvatar"[^>]*src="([^"]+)"', html or "", re.I)
+    if m:
+        avatar = _html.unescape(m.group(1))
+    stats: dict[str, str | None] = {
+        "views": None, "subscribers": None, "video_count": None, "rank": None,
+    }
+    for sm in re.finditer(
+        r'class="info[^"]*"\s*>\s*([\d,]+)\s*<br\s*/?>\s*<span>\s*([^<]+)',
+        html or "",
+        re.I,
+    ):
+        label = sm.group(2).strip().upper()
+        val = sm.group(1).strip()
+        if "VIEW" in label:
+            stats["views"] = val
+        elif "SUBSCRIB" in label:
+            stats["subscribers"] = val
+        elif "VIDEO" in label:
+            stats["video_count"] = val
+        elif "RANK" in label:
+            stats["rank"] = val
+    bio = None
+    m = re.search(
+        r'class="cdescriptions"[^>]*>\s*<p class="joined">([^<]+)', html or "", re.I
+    )
+    if m:
+        bio = _html.unescape(m.group(1)).strip() or None
+    joined = None
+    m = re.search(
+        r'channelInfoHeadlines">\s*JOINED\s*</span>\s*<span>([^<]+)', html or "", re.I
+    )
+    if m:
+        joined = _html.unescape(m.group(1)).strip() or None
+    return {
+        "name": name,
+        "avatar": avatar,
+        "bio": bio,
+        "joined": joined,
+        **stats,
+    }
+
+
+def parse_person_profile(html: str) -> dict:
+    """Name / avatar / stats from a pornstar or model page."""
+    name = None
+    m = re.search(r'<h1[^>]*itemprop="name"[^>]*>\s*([^<]+)', html or "", re.I)
+    if not m:
+        m = re.search(r"<h1[^>]*>\s*([^<]+)", html or "", re.I)
+    if m:
+        name = _html.unescape(m.group(1)).strip()
+    avatar = None
+    m = re.search(r'id="getAvatar"[^>]*src="([^"]+)"', html or "", re.I)
+    if m:
+        avatar = _html.unescape(m.group(1))
+    views = None
+    m = re.search(r'data-title="Video views:\s*([^"]+)"', html or "", re.I)
+    if m:
+        views = m.group(1).strip()
+    subscribers = None
+    m = re.search(r'data-title="Subscribers:\s*([^"]+)"', html or "", re.I)
+    if m:
+        subscribers = m.group(1).strip()
+    rank = None
+    m = re.search(
+        r'class="infoBox"[^>]*>\s*<span class="big">([\s\S]*?)</span>\s*'
+        r'<div class="title">\s*Model Rank',
+        html or "",
+        re.I,
+    )
+    if m:
+        num = re.search(r"([\d,]+)", m.group(1))
+        if num:
+            rank = num.group(1)
+    bio = None
+    m = re.search(r'itemprop="description"[^>]*>([^<]+)', html or "", re.I)
+    if m:
+        bio = _html.unescape(m.group(1)).strip() or None
+    # Do NOT use showingCounter — on a pornstar home page it is a subsection
+    # ("Showing 1-12 of 120") not the real catalogue size. Search cards carry
+    # the accurate count and the handler merges it in.
+    return {
+        "name": name,
+        "avatar": avatar,
+        "bio": bio,
+        "joined": None,
+        "views": views,
+        "subscribers": subscribers,
+        "video_count": None,
+        "rank": rank,
+    }
+
+
+def _rank_producer(item: dict, query: str) -> tuple:
+    name = (item.get("name") or "").lower()
+    ql = query.lower().strip()
+    if name == ql:
+        exact = 0
+    elif name.startswith(ql):
+        exact = 1
+    elif ql in name:
+        exact = 2
+    else:
+        exact = 3
+    kind_order = 0 if item.get("kind") == "channel" else 1
+    return (exact, kind_order)
+
+
+def _search_producers_sync(query: str) -> list[dict]:
+    query = (query or "").strip()
+    if not query:
+        return []
+    channels: list[dict] = []
+    people: list[dict] = []
+    failed = 0
+    last_error: Exception | None = None
+    try:
+        ch_path = "/channels/search?" + urlencode({"channelSearch": query})
+        channels = parse_channel_search(_get_ph_html(ch_path))
+    except Exception as exc:
+        failed += 1
+        last_error = exc
+        logger.warning("channel search failed for %r: %s", query, exc)
+    try:
+        ps_path = "/pornstars/search?" + urlencode({"search": query})
+        people = parse_pornstar_search(_get_ph_html(ps_path))
+    except Exception as exc:
+        failed += 1
+        last_error = exc
+        logger.warning("pornstar search failed for %r: %s", query, exc)
+
+    if not channels and not people:
+        if failed == 2:
+            raise PornHubBlockedError(
+                "PornHub producer search was blocked on every host."
+            ) from last_error
+        return []
+
+    merged = channels + people
+    merged.sort(key=lambda item: _rank_producer(item, query))
+    seen: set[str] = set()
+    out: list[dict] = []
+    for item in merged:
+        key = f"{item.get('kind')}/{item.get('slug', '').lower()}"
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(item)
+        if len(out) >= _PRODUCER_MAX_SEARCH:
+            break
+    logger.info(
+        "producer search %r -> %d channels + %d people = %d",
+        query, len(channels), len(people), len(out),
+    )
+    return out
+
+
+def _fetch_producer_sync(kind: str, slug: str) -> dict:
+    kind = (kind or "").lower().strip()
+    if kind == "channels":
+        kind = "channel"
+    slug = (slug or "").strip()
+    if kind not in _KIND_PATH or not slug:
+        raise ProducerNotFoundError(f"bad producer {kind}/{slug}")
+    path_kind = _KIND_PATH[kind]
+    profile_path = f"/{path_kind}/{slug}"
+    html = _get_ph_html(profile_path)
+    if kind == "channel":
+        profile = parse_channel_profile(html)
+        videos_path = f"/{path_kind}/{slug}/videos?o=vi"
+        section_ids = ["showAllChanelVideos", "moreData"]
+    else:
+        profile = parse_person_profile(html)
+        videos_path = f"/{path_kind}/{slug}/videos?o=mv"
+        section_ids = ["mostRecentVideosSection", "uploadedVideosSection"]
+    profile["kind"] = kind
+    profile["slug"] = slug
+    profile["url"] = f"https://www.pornhub.com{profile_path}"
+    if not (profile.get("name") or "").strip():
+        raise ProducerNotFoundError(f"no profile at {profile_path}")
+    videos: list[dict] = []
+    try:
+        vhtml = _get_ph_html(videos_path)
+        videos = parse_listing_videos(vhtml, section_ids, PRODUCER_TOP_N)
+    except Exception as exc:
+        logger.warning("producer videos fetch failed for %s/%s: %s", kind, slug, exc)
+    if not videos:
+        videos = parse_listing_videos(html, section_ids, PRODUCER_TOP_N)
+    profile["videos"] = videos[:PRODUCER_TOP_N]
+    logger.info(
+        "producer %s/%s -> %s, %d videos",
+        kind, slug, profile.get("name"), len(profile["videos"]),
+    )
+    return profile
+
+
+async def search_producers(query: str) -> list[dict]:
+    """Search channels + pornstars/models. Returns producer cards."""
+    return await asyncio.to_thread(_search_producers_sync, query)
+
+
+async def fetch_producer(kind: str, slug: str) -> dict:
+    """Full profile + up to ``PRODUCER_TOP_N`` most-viewed videos."""
+    return await asyncio.to_thread(_fetch_producer_sync, kind, slug)
 
 
 # --------------------------------------------------------------------------
