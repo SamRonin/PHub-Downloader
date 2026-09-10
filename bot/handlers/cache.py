@@ -43,3 +43,6 @@ info_cache = InfoCache()
 
 #: Search result pages live long enough for a user to browse/paginate them.
 search_cache = InfoCache(ttl=900, max_items=2000)
+
+#: Producer search lists + profile cards (top-10 video buttons).
+producer_cache = InfoCache(ttl=900, max_items=2000)
