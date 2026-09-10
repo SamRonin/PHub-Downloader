@@ -40,3 +40,6 @@ class InfoCache:
 
 
 info_cache = InfoCache()
+
+#: Search result pages live long enough for a user to browse/paginate them.
+search_cache = InfoCache(ttl=900, max_items=2000)

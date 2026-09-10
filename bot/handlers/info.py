@@ -175,6 +175,16 @@ async def handle_link(message: Message):
     # Respect the language the user picked (/lang) — a Persian user whose
     # Telegram UI is English used to get the whole card in English.
     user = await db.get_user(message.from_user.id)
+    if user is None:
+        # First contact without /start: create the row so the quality buttons
+        # (which require it) do not answer "you are banned".
+        await db.create_user(
+            message.from_user.id,
+            message.from_user.username or "",
+            message.from_user.full_name or "",
+            detect_lang(message.from_user.language_code),
+        )
+        user = await db.get_user(message.from_user.id)
     lang = row_get(user, "lang") or detect_lang(message.from_user.language_code)
     status = await message.answer(t(lang, "fetching"))
     try:
