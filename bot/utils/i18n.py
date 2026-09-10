@@ -14,12 +14,14 @@ STRINGS = {
             "ℹ️ <b>راهنما</b>\n\n"
             "• لینک ویدیو را بفرست تا مشخصات و کیفیت‌ها نمایش داده شود.\n"
             "• یا فقط کلمات را بفرست تا در Pornhub جست‌وجو شود.\n"
+            "• با /producer اسم تولیدکننده را بفرست تا پروفایل و ۱۰ ویدیوی پربازدید نشان داده شود.\n"
             "• روی دکمه کیفیت بزن تا دانلود شروع شود.\n"
             "• فایل‌های تا ۵۰ مگ مستقیم در تلگرام ارسال می‌شوند؛ فایل‌های بزرگ‌تر با لینک Pixeldrain.\n"
             "• لینک‌های Pixeldrain به‌صورت خودکار بعد از ۳۰ دقیقه حذف می‌شوند.\n\n"
             "دستورات:\n"
             "/start - شروع و لینک رفرال\n"
             "/search - جست‌وجو در Pornhub\n"
+            "/producer - جست‌وجوی تولیدکننده\n"
             "/lang - تغییر زبان\n"
             "/status - وضعیت سهمیه امروز"
         ),
@@ -42,6 +44,28 @@ STRINGS = {
         "search_no_results": "❌ نتیجه‌ای برای «{q}» پیدا نشد. کلمه‌ی دیگری را امتحان کن.",
         "search_usage": "🔎 برای جست‌وجو، کلمات را بفرست (مثلا: step sister) یا بنویس /search step sister",
         "search_expired": "⌛ نتایج منقضی شده‌اند. لطفاً دوباره جست‌وجو کن.",
+        "producer_searching": "🎭 در حال جست‌وجوی تولیدکننده «{q}»...",
+        "producer_usage": (
+            "🎭 اسم تولیدکننده را بعد از دستور بنویس، مثلاً:\n"
+            "/producer Brazzers\n"
+            "/producer Riley Reid\n\n"
+            "یا لینک کانال / پورن‌استار / مدل Pornhub را مستقیم بفرست."
+        ),
+        "producer_no_results": "❌ تولیدکننده‌ای با نام «{q}» پیدا نشد.",
+        "producer_header": "🎭 <b>تولیدکننده‌ها برای «{q}»</b>\nصفحه {page} از {pages}",
+        "producer_hint": "👆 یکی را انتخاب کن تا پروفایل و ۱۰ ویدیوی پربازدید نشان داده شود.",
+        "producer_expired": "⌛ نتایج منقضی شده‌اند. لطفاً دوباره جست‌وجو کن.",
+        "producer_fetching": "🎭 در حال دریافت پروفایل...",
+        "producer_kind_channel": "کانال",
+        "producer_kind_pornstar": "پورن‌استار",
+        "producer_kind_model": "مدل",
+        "producer_followers": "👥 دنبال‌کننده‌ها: <b>{n}</b>",
+        "producer_videos_count": "🎬 ویدیوها: <b>{n}</b>",
+        "producer_views_count": "👀 بازدید ویدیوها: <b>{n}</b>",
+        "producer_rank": "🏆 رتبه: <b>{n}</b>",
+        "producer_joined": "📅 عضویت: {n}",
+        "producer_top_hint": "👇 ۱۰ ویدیوی پربازدید — یکی را انتخاب کن تا کیفیت‌های دانلود نشان داده شود.",
+        "producer_no_videos": "ویدیویی برای نمایش پیدا نشد.",
         "expired": "⌛ این پیام منقضی شده است. لطفاً لینک را دوباره بفرست.",
         "banned": "⛔ دسترسی شما مسدود شده است.",
         "already_processing": "⏳ یک دانلود دیگر در حال انجام است. لطفاً صبر کن.",
@@ -137,12 +161,14 @@ STRINGS = {
             "ℹ️ <b>Help</b>\n\n"
             "• Send a video link to see qualities and sizes.\n"
             "• Or just send keywords to search Pornhub.\n"
+            "• Use /producer <name> to see a producer's profile and their 10 most-viewed videos.\n"
             "• Tap a quality button to start the download.\n"
             "• Files up to 50 MB are sent directly in Telegram; larger files get a Pixeldrain link.\n"
             "• Pixeldrain links are auto-deleted after 30 minutes.\n\n"
             "Commands:\n"
             "/start - start & referral link\n"
             "/search - search Pornhub\n"
+            "/producer - search a producer\n"
             "/lang - switch language\n"
             "/status - today's quota status"
         ),
@@ -165,6 +191,28 @@ STRINGS = {
         "search_no_results": "❌ No results for “{q}”. Try other keywords.",
         "search_usage": "🔎 Send keywords to search (e.g. step sister) or use /search step sister",
         "search_expired": "⌛ These results expired. Please search again.",
+        "producer_searching": "🎭 Searching for producer “{q}”...",
+        "producer_usage": (
+            "🎭 Type the producer’s name after the command, e.g.\n"
+            "/producer Brazzers\n"
+            "/producer Riley Reid\n\n"
+            "You can also send a Pornhub channel / pornstar / model URL directly."
+        ),
+        "producer_no_results": "❌ No producer found for “{q}”.",
+        "producer_header": "🎭 <b>Producers for “{q}”</b>\nPage {page} of {pages}",
+        "producer_hint": "👆 Pick one to see the profile and the 10 most-viewed videos.",
+        "producer_expired": "⌛ These results expired. Please search again.",
+        "producer_fetching": "🎭 Fetching profile...",
+        "producer_kind_channel": "Channel",
+        "producer_kind_pornstar": "Pornstar",
+        "producer_kind_model": "Model",
+        "producer_followers": "👥 Followers: <b>{n}</b>",
+        "producer_videos_count": "🎬 Videos: <b>{n}</b>",
+        "producer_views_count": "👀 Video views: <b>{n}</b>",
+        "producer_rank": "🏆 Rank: <b>{n}</b>",
+        "producer_joined": "📅 Joined: {n}",
+        "producer_top_hint": "👇 10 most-viewed videos — pick one to see download qualities.",
+        "producer_no_videos": "No videos to show.",
         "expired": "⌛ This message expired. Please send the link again.",
         "banned": "⛔ You are banned.",
         "already_processing": "⏳ Another download is already in progress. Please wait.",
